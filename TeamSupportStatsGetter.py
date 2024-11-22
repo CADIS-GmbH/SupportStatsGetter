@@ -516,9 +516,17 @@ def make_ticket_calendar(t):
     history_by_date = group_by_date(history)
     actions_by_date = group_by_date(actions)
 
-    s_date_str = min(min(history_by_date.keys()), min(actions_by_date.keys()))
+
+    if len(history_by_date) > 0:
+        s_date_str = min(min(history_by_date.keys()), min(actions_by_date.keys()))
+    else:
+        s_date_str = min(actions_by_date.keys())
+
     if t["Status"] in ["Closed", "Spam/Junk Delete"]:
-        e_date_str = max(max(history_by_date.keys()), max(actions_by_date.keys()))
+        if len(history_by_date) > 0:
+            e_date_str = max(max(history_by_date.keys()), max(actions_by_date.keys()))
+        else:
+            e_date_str = max(actions_by_date.keys())
     else:
         e_date_str = datetime.datetime.now(tz=pytz.utc).isoformat()[:10]
 
