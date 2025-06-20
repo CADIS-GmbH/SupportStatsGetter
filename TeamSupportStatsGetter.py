@@ -19,6 +19,7 @@ LOAD_INCREMENT_IN_DAYS = 14
 
 RETRY_INTERVAL_SECONDS = 60
 
+STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME = ["Closed","Closed - NR","Spam/Junk Delete","Closed - Resolved","On Hold","Waiting on Customer"]
 
 STATUS_CHANGE_RE = "Changed status from (?:&apos;|')(.*)(?:&apos;|') to (?:&apos;|')(.*)(?:&apos;|')"
 STATUS_CHANGE_TO_RESOLVED_RE = "Changed status from (?:&apos;|')(?!Closed)(.*)(?:&apos;|') to (?:&apos;|')Closed(.*)(?:&apos;|')"
@@ -28,8 +29,9 @@ SEVERITY_CHANGE_RE = "Changed severity from (?:&apos;|')(.*)(?:&apos;|') to (?:&
 EMAIL_REPLY_RE = 'Changed status of ticket to (?:&quot;|")(.*)(?:&quot;|") since ticket was replied to via e-mail'
 EXCLUDE_BY_NAME_RES = ['\[RECOVERY\]']
 
+KEEP_RAW_ACTION_TEXT = False # if true the text is kept in its raw state (MAX_ACTION_TEXT_LEN is ignored)
+GET_ATTACHEMNTS = False # download and save files
 MAX_ACTION_TEXT_LEN = 1000
-
 
 SEVERITY_POS_MAP = {
     "Normal": 0,
@@ -52,7 +54,8 @@ CADIS_BDK_CONTACTS = ["8790127", "8790128", "8790895", "8791279", "8791280", "87
                       "9829169", "9853151", "9856350", "8799323", "9575844", "8799317", "9132791", "9563940", "9769965",
                       "8785940", "9831827", "9575852", "9831822", "8911198", "8785935", "9892277", "9575850", "9446502",
                       "8785936", "9575845", "8800885", "8980870", "8785945", "9831815", "8785941", "8785938", "9446497",
-                      "8785944", "9892285", "9329216"]
+                      "8785944", "9892285", "9329216", "10519045"]
+
 
 
 class DataStore(object):
@@ -170,6 +173,8 @@ class StatisticsDayRecord:
     did_resolve: bool = False
     total_days_open: int = 0
     weekdays_days_since_last_contact: int = 0
+    adjusted_resolution_days: int = 0
+    adjusted_resolution_weekdays: int = 0
 
     cw: str = field(init=False)
     weekday: int = field(init=False)
@@ -266,9 +271,12 @@ class StatisticsDayRecord:
         r.start_severity_txt = r.end_severity_txt = self.end_severity_txt
         r.start_assigned_group = r.end_assigned_group = self.end_assigned_group
         r.start_assigned_user = r.end_assigned_user = self.end_assigned_user
-        r.total_days_open = int(self.total_days_open) + (1 if "Closed" not in self.end_status else 0)
-        r.weekdays_days_since_last_contact = int(self.weekdays_days_since_last_contact) + (1 if (self.weekday not in [5,
-                                                                                                                      6]) else 0)  # increment the days since last contact by 1 execept for Sa and Su (i.e. if today is Fr. or Sa. then don't)
+        r.total_days_open = int(self.total_days_open) + (0 if "Closed" in self.end_status else 1)
+        r.weekdays_days_since_last_contact = int(self.weekdays_days_since_last_contact) + (0 if (self.weekday in [5, 6]) else 1)  # increment the days since last contact by 1 execept for Sa and Su (i.e. if today is Fr. or Sa. then don't)
+
+        r.adjusted_resolution_weekdays = int(self.adjusted_resolution_weekdays) + (0 if (self.end_status in STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME) or (self.weekday in [5, 6]) else 1) # increase the adjusted resolution days only if the status is open on our side and not on weekends
+        r.adjusted_resolution_days = int(self.adjusted_resolution_days) + (0 if (self.end_status in STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME) else 1)  # increase the adjusted resolution days only if the status is open on our side
+
 
         return r
 
@@ -391,6 +399,14 @@ def calculate_kpi_values(tickets):
 
         t["Calendar"] = make_ticket_calendar(t)
 
+        #get the adjusted resolution time from the last record if the ticket is resolved
+        t["AdjustedResolutionDays"] = None
+        t["AdjustedResolutionWeekdays"] = None
+        if (t["Status"].find("Closed") >= 0) and len(t["Calendar"]) > 0:
+            t["AdjustedResolutionDays"] = t["Calendar"][-1].get('adjusted_resolution_days', None)
+            t["AdjustedResolutionWeekdays"] = t["Calendar"][-1].get('adjusted_resolution_weekdays', None)
+
+
         r_tickets.append(t)
 
     return r_tickets
@@ -416,7 +432,8 @@ def __reformat_record(r):
             r[k] = t.isoformat()
             add_dict_values[k + "_cw"] = cw_string_from_isodate(r[k])
         elif ("Name" in k or "Description" in k or "Text" in k) and v:
-            r[k] = ht.handle(ht.handle(v[:MAX_ACTION_TEXT_LEN]))
+            if not KEEP_RAW_ACTION_TEXT:
+                r[k] = ht.handle(ht.handle(v[:MAX_ACTION_TEXT_LEN]))
         elif "Position" in k and v:
             r[k] = int(v)
         elif "Spent" in k and v:
@@ -550,7 +567,7 @@ def make_ticket_calendar(t):
 
 
 def load_tickets(base_url: str, path: str, username: str, password, filter_params=None,
-                 from_ts: datetime.datetime = dateutil.parser.isoparse('2023-01-01T00:00:00.000000Z')) -> list | None:
+                 from_ts: datetime.datetime = dateutil.parser.isoparse('2023-01-01T00:00:00.000000Z'), attachment_save_dir='./attachments') -> list | None:
     """
 
     :param base_url:
@@ -612,6 +629,33 @@ def load_tickets(base_url: str, path: str, username: str, password, filter_param
         act_url = urllib.parse.urljoin(base_url, f'{path}/{t["ID"]}/Actions')
         t["Actions"] = get_records(act_url, h, 'Actions') or []
         print(f'Ticket #{t["TicketNumber"]} [{i}/{n}]: {len(t["Actions"])} Action entries retrieved from {act_url}')
+        if GET_ATTACHEMNTS:
+            for act in t["Actions"]:
+                # Create directory if it doesn't exist
+                directory = Path(f"{attachment_save_dir}")
+                directory.mkdir(parents=True, exist_ok=True)
+
+                print(f'Get attachemnts {act_url}')
+                act_url = urllib.parse.urljoin(base_url, f'{path}/{t["ID"]}/Actions/{act["ID"]}/Attachments')
+                print(f'Get attachemnts {act_url}')
+                atms = get_records(act_url, h, 'Attachments') or []
+                act["Attachments"] = atms
+                for atm_file in atms:
+                    act_url = urllib.parse.urljoin(base_url, f'{path}/{t["ID"]}/Actions/{act["ID"]}/Attachments/{atm_file["ID"]}')
+                    print(f'Get attachemnts {act_url}')
+
+                    try:
+                        response = requests.get(act_url, headers=h,  stream=True)  # Stream to avoid loading large files into memory
+                        response.raise_for_status()  # Raise an error for bad responses (4xx and 5xx)
+
+                        save_path = f"{attachment_save_dir}/#{t["TicketNumber"]}_atmt_{atm_file["ID"]}_{atm_file["FileName"]}"
+                        with open(save_path, 'wb') as file:
+                            for chunk in response.iter_content(chunk_size=8192):  # Read in chunks
+                                file.write(chunk)
+                            print(f"File downloaded successfully: {save_path}")
+                    except Exception as e:
+                        print(f"WARNING: failed to write attachment #{t["TicketNumber"]}_atmt_{atm_file["ID"]}_{atm_file["FileName"]}: {str(e)}")
+
 
         t["Calendar"] = make_ticket_calendar(t)
 
@@ -649,6 +693,14 @@ def parse_arguments():
                         help="only recalculate the existing data store",
                         action='store_true')
 
+    parser.add_argument("--keep_raw_action_text",
+                        help="if set keep the raw text of action. By default the text is truncated and html is removed.",
+                        action='store_true')
+    parser.add_argument("--download_attachments",
+                        help="if set attachments are downloaded and saved to the file system.",
+                        action='store_true')
+
+
     # parser.add_argument("--reverse", "-r",
     #                     help="reverse from the oldest data entry today back to initial_start_date",
     #                     action='store_true')
@@ -659,6 +711,11 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+
+    global KEEP_RAW_ACTION_TEXT
+    KEEP_RAW_ACTION_TEXT= args.keep_raw_action_text
+    global GET_ATTACHEMNTS
+    GET_ATTACHEMNTS= args.download_attachments
 
     # create a data store and load data hat has been retrieved and save previously
     tickets_data_store = DataStore(args.data_dir, 'tickets')
@@ -690,7 +747,8 @@ def main():
         records = load_tickets(base_url=args.base_url, username=args.username, password=args.password,
                                path='/api/json/Tickets',
                                from_ts=start_ts,
-                               filter_params={'GroupName[contains]': args.company})
+                               filter_params={'GroupName[contains]': args.company},
+                               attachment_save_dir = f"{args.data_dir}/attachments")
 
     if records:
         # add the data to the data store and save
