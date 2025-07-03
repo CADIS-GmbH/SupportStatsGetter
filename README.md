@@ -29,4 +29,14 @@ Subsequent runs only request tickets updated after the newest record already sto
 Comments and worklogs for each ticket are downloaded and saved alongside the tickets.
 Comments include a `public` flag to indicate visibility in the service desk.
 
+Each comment is stored in the `jira_comments` table with the following columns:
+
+- `id` - the Jira comment ID
+- `ticket_id` - internal issue ID
+- `issue_key` - the human readable issue key
+- `author` - display name of the comment author
+- `type` - value of the body type returned by Jira
+- `body` - the comment text rendered as HTML
+- `created` / `updated` - timestamps
+
 The script currently requires the `requests`, `pytz`, `dateutil` and `sqlalchemy` packages.

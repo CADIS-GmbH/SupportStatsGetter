@@ -118,7 +118,9 @@ class SQLiteStore:
             self.meta,
             Column("id", String, primary_key=True),
             Column("ticket_id", String, ForeignKey("jira_tickets.id")),
+            Column("issue_key", String),
             Column("author", String),
+            Column("type", String),
             Column("body", Text),
             Column("public", Boolean, default=True),
             Column("created", DateTime),
@@ -147,6 +149,12 @@ class SQLiteStore:
         if "public" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_comments ADD COLUMN public BOOLEAN"))
+        if "issue_key" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_comments ADD COLUMN issue_key VARCHAR"))
+        if "type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_comments ADD COLUMN type VARCHAR"))
 
     @log_call
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
@@ -196,7 +204,11 @@ class SupportStatsGetter:
         all_comments: list[dict[str, Any]] = []
 
         while True:
-            params = {"startAt": start_at, "maxResults": max_results}
+            params = {
+                "startAt": start_at,
+                "maxResults": max_results,
+                "expand": "renderedBody",
+            }
             r = requests.get(
                 url,
                 params=params,
@@ -324,17 +336,24 @@ class SupportStatsGetter:
         ]
         self.store.insert_many(self.store.jira_tickets, records)
 
-    def store_jira_comments(self, issue_id: str, comments: Iterable[dict[str, Any]]) -> None:
+    def store_jira_comments(self, issue_id: str, issue_key: str, comments: Iterable[dict[str, Any]]) -> None:
         records = []
         for comment in comments:
-            body = comment.get("body")
+            body = comment.get("renderedBody") or comment.get("body")
             if isinstance(body, dict):
                 body = json.dumps(body)
+            comment_type = None
+            if isinstance(comment.get("body"), dict):
+                comment_type = comment.get("body", {}).get("type")
+            else:
+                comment_type = comment.get("type")
             records.append(
                 {
                     "id": comment.get("id"),
                     "ticket_id": issue_id,
+                    "issue_key": issue_key,
                     "author": comment.get("author", {}).get("displayName"),
+                    "type": comment_type,
                     "body": body,
                     "public": comment.get("public"),
                     "created": comment.get("created"),
@@ -410,7 +429,7 @@ if __name__ == "__main__":
             worklogs_total = 0
             for issue in issues:
                 comments = getter.fetch_jira_comments(issue["id"])
-                getter.store_jira_comments(issue["id"], comments)
+                getter.store_jira_comments(issue["id"], issue.get("key"), comments)
                 comments_total += len(comments)
                 worklogs = getter.fetch_jira_worklogs(issue["id"])
                 getter.store_jira_worklogs(issue["id"], worklogs)
