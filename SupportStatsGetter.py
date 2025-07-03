@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+# Jira display names of internal agents used to detect response times
+INTERNAL_USERS: set[str] = set()
+
 import requests
 import dateutil.parser
 import pytz
@@ -92,6 +95,92 @@ class Config:
         )
 
 
+def cw_string_from_datetime(dt: datetime.datetime | None) -> str | None:
+    """Return ISO calendar week string as YYYY.WW."""
+    if not dt:
+        return None
+    return f"{dt.isocalendar().year}.{dt.isocalendar().week:02}"
+
+
+def active_weeks(start: datetime.datetime | None, end: datetime.datetime | None) -> str | None:
+    """Return comma separated list of ISO weeks between two dates."""
+    if not start or not end:
+        return None
+    weeks: set[str] = set()
+    d = start
+    while d <= end:
+        weeks.add(cw_string_from_datetime(d))
+        d += datetime.timedelta(days=7)
+    weeks.add(cw_string_from_datetime(end))
+    return ",".join(sorted(weeks))
+
+
+def extract_resolved_date(changelog: list[dict[str, Any]]) -> datetime.datetime | None:
+    """Return the date when status changed to Closed, Resolved or Cancelled."""
+    closing = {"Closed", "Resolved", "Cancelled"}
+    histories = sorted(changelog, key=lambda h: h.get("created") or datetime.datetime.min)
+    for hist in histories:
+        for item in hist.get("items", []):
+            if item.get("field") == "status" and item.get("toString") in closing:
+                return hist.get("created")
+    return None
+
+
+def extract_first_response_date(comments: list[dict[str, Any]]) -> datetime.datetime | None:
+    """Return timestamp of first public comment from an internal user."""
+    if not comments:
+        return None
+    comments = sorted(comments, key=lambda c: c.get("created"))
+    idx = 0
+    for c in comments:
+        if (
+            idx > 0
+            and c.get("public")
+            and (c.get("author") in INTERNAL_USERS)
+        ):
+            return c.get("created")
+        idx += 1
+    return None
+
+
+def extract_last_response_date(comments: list[dict[str, Any]]) -> datetime.datetime | None:
+    """Return timestamp of last public comment from an internal user."""
+    if not comments:
+        return None
+    comments = sorted(comments, key=lambda c: c.get("created"), reverse=True)
+    idx = len(comments) - 1
+    for c in comments:
+        if (
+            idx > 0
+            and c.get("public")
+            and (c.get("author") in INTERNAL_USERS)
+        ):
+            return c.get("created")
+        idx -= 1
+    return None
+
+
+def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], changelog: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compute KPI fields for a Jira ticket."""
+    result = issue.copy()
+    created = result.get("created")
+    updated = result.get("updated")
+    resolved = result.get("resolved") or extract_resolved_date(changelog)
+    result["resolved"] = resolved
+
+    result["CreatedWeek"] = cw_string_from_datetime(created)
+    result["ResolvedWeek"] = cw_string_from_datetime(resolved)
+    result["ActiveWeeks"] = active_weeks(created, resolved or updated)
+    fields = result.get("fields", {})
+    result["TicketSource"] = (
+        fields.get("request-channel-source")
+        or fields.get("request-channel-type")
+    )
+    result["FirstResponseDate"] = extract_first_response_date(comments)
+    result["LastResponseDate"] = extract_last_response_date(comments)
+    return result
+
+
 class SQLiteStore:
     """Simple wrapper around an SQLite database using SQLAlchemy."""
 
@@ -104,7 +193,8 @@ class SQLiteStore:
     @log_call
     def _prepare_schema(self) -> None:
         self.jira_tickets = Table(
-            "jira_tickets", self.meta,
+            "jira_tickets",
+            self.meta,
             Column("id", String, primary_key=True),
             Column("key", String),
             Column("summary", Text),
@@ -112,6 +202,12 @@ class SQLiteStore:
             Column("created", DateTime),
             Column("resolved", DateTime, nullable=True),
             Column("updated", DateTime),
+            Column("ticket_source", String),
+            Column("created_week", String),
+            Column("resolved_week", String),
+            Column("active_weeks", Text),
+            Column("first_response_date", DateTime),
+            Column("last_response_date", DateTime),
         )
         self.jira_comments = Table(
             "jira_comments",
@@ -159,6 +255,24 @@ class SQLiteStore:
         if "updated" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN updated DATETIME"))
+        if "ticket_source" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN ticket_source VARCHAR"))
+        if "created_week" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN created_week VARCHAR"))
+        if "resolved_week" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN resolved_week VARCHAR"))
+        if "active_weeks" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN active_weeks TEXT"))
+        if "first_response_date" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN first_response_date DATETIME"))
+        if "last_response_date" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN last_response_date DATETIME"))
 
         cols = [c["name"] for c in inspector.get_columns("jira_comments")]
         if "public" not in cols:
@@ -370,18 +484,27 @@ class SupportStatsGetter:
 
     @log_call
     def store_jira_tickets(self, issues: Iterable[dict[str, Any]]) -> None:
-        records = [
-            {
-                "id": issue["id"],
-                "key": issue.get("key"),
-                "summary": issue.get("fields", {}).get("summary"),
-                "status": issue.get("fields", {}).get("status", {}).get("name"),
-                "created": issue.get("created"),
-                "resolved": issue.get("resolved"),
-                "updated": issue.get("updated"),
-            }
-            for issue in issues
-        ]
+        records = []
+        for issue in issues:
+            fields = issue.get("fields", {})
+            records.append(
+                {
+                    "id": issue["id"],
+                    "key": issue.get("key"),
+                    "summary": fields.get("summary"),
+                    "status": fields.get("status", {}).get("name"),
+                    "created": issue.get("created"),
+                    "resolved": issue.get("resolved"),
+                    "updated": issue.get("updated"),
+                    "ticket_source": issue.get("TicketSource"),
+                    "created_week": issue.get("CreatedWeek"),
+                    "resolved_week": issue.get("ResolvedWeek"),
+                    "active_weeks": issue.get("ActiveWeeks"),
+                    "first_response_date": issue.get("FirstResponseDate"),
+                    "last_response_date": issue.get("LastResponseDate"),
+                }
+            )
+        
         self.store.insert_many(self.store.jira_tickets, records)
 
     def store_jira_comments(self, issue_id: str, issue_key: str, comments: Iterable[dict[str, Any]]) -> None:
@@ -491,30 +614,33 @@ if __name__ == "__main__":
     if cfg.jira_base_url:
         try:
             since = getter.latest_update_timestamp()
-            issues = getter.fetch_jira_tickets(updated_since=since)
-            getter.store_jira_tickets(issues)
-            logging.info(f"Stored {len(issues)} Jira tickets in {cfg.db_path}")
-        except Exception:  # noqa: BLE001
-            logging.exception("Failed to fetch or store Jira tickets")
-        try:
+            raw_issues = getter.fetch_jira_tickets(updated_since=since)
             comments_total = 0
             worklogs_total = 0
             changelog_total = 0
-            for issue in issues:
+            processed: list[dict[str, Any]] = []
+            for issue in raw_issues:
                 comments = getter.fetch_jira_comments(issue["id"])
-                getter.store_jira_comments(issue["id"], issue.get("key"), comments)
-                comments_total += len(comments)
                 worklogs = getter.fetch_jira_worklogs(issue["id"])
-                getter.store_jira_worklogs(issue["id"], worklogs)
-                worklogs_total += len(worklogs)
                 changelog = getter.fetch_jira_changelog(issue["id"])
+
+                processed_issue = calculate_kpi_fields(issue, comments, changelog)
+                processed.append(processed_issue)
+
+                getter.store_jira_comments(issue["id"], issue.get("key"), comments)
+                getter.store_jira_worklogs(issue["id"], worklogs)
                 getter.store_jira_changelog(issue["id"], changelog)
+
+                comments_total += len(comments)
+                worklogs_total += len(worklogs)
                 for hist in changelog:
                     changelog_total += len(hist.get("items", []))
+
+            getter.store_jira_tickets(processed)
             logging.info(
-                f"Stored {len(issues)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs and {changelog_total} changelog items in {cfg.db_path}"
+                f"Stored {len(processed)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs and {changelog_total} changelog items in {cfg.db_path}"
             )
         except Exception:  # noqa: BLE001
-            logging.exception("Failed to fetch or store Jira comments or worklogs")
+            logging.exception("Failed to fetch or store Jira data")
     else:
         logging.error("Jira configuration missing in config file.")
