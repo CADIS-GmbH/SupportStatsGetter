@@ -113,6 +113,16 @@ class SQLiteStore:
             Column("resolved", DateTime, nullable=True),
             Column("updated", DateTime),
         )
+        self.jira_comments = Table(
+            "jira_comments",
+            self.meta,
+            Column("id", String, primary_key=True),
+            Column("ticket_id", String, ForeignKey("jira_tickets.id")),
+            Column("author", String),
+            Column("body", Text),
+            Column("created", DateTime),
+            Column("updated", DateTime),
+        )
         self.meta.create_all(self.engine)
 
         inspector = inspect(self.engine)
@@ -156,6 +166,40 @@ class SupportStatsGetter:
     @log_call
     def latest_update_timestamp(self) -> datetime.datetime | None:
         return self.store.newest_updated_ts()
+
+    @log_call
+    def fetch_jira_comments(self, issue_id_or_key: str) -> list[dict[str, Any]]:
+        """Fetch all comments for a Jira issue (handles pagination)."""
+        if not self.config.jira_base_url:
+            raise ValueError("jira_base_url not configured")
+
+        url = f"{self.config.jira_base_url}/rest/api/3/issue/{issue_id_or_key}/comment"
+        start_at = 0
+        max_results = 50
+        all_comments: list[dict[str, Any]] = []
+
+        while True:
+            params = {"startAt": start_at, "maxResults": max_results}
+            r = requests.get(
+                url,
+                params=params,
+                auth=self._jira_auth(),
+                headers={"Accept": "application/json"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            comments = data.get("comments", [])
+            for comment in comments:
+                comment["created"] = self._parse_ts(comment.get("created"))
+                comment["updated"] = self._parse_ts(comment.get("updated"))
+            all_comments.extend(comments)
+
+            total = data.get("total", 0)
+            if start_at + len(comments) >= total or not comments:
+                break
+            start_at += len(comments)
+
+        return all_comments
 
     @log_call
     def fetch_jira_tickets(self, jql: str = "", updated_since: datetime.datetime | None = None) -> list[dict[str, Any]]:
@@ -227,6 +271,24 @@ class SupportStatsGetter:
         ]
         self.store.insert_many(self.store.jira_tickets, records)
 
+    def store_jira_comments(self, issue_id: str, comments: Iterable[dict[str, Any]]) -> None:
+        records = []
+        for comment in comments:
+            body = comment.get("body")
+            if isinstance(body, dict):
+                body = json.dumps(body)
+            records.append(
+                {
+                    "id": comment.get("id"),
+                    "ticket_id": issue_id,
+                    "author": comment.get("author", {}).get("displayName"),
+                    "body": body,
+                    "created": comment.get("created"),
+                    "updated": comment.get("updated"),
+                }
+            )
+        self.store.insert_many(self.store.jira_comments, records)
+
     @staticmethod
     @log_call
     def _parse_ts(value: str | None) -> datetime.datetime | None:
@@ -270,5 +332,14 @@ if __name__ == "__main__":
             logging.info(f"Stored {len(issues)} Jira tickets in {cfg.db_path}")
         except Exception:  # noqa: BLE001
             logging.exception("Failed to fetch or store Jira tickets")
+        try:
+            comments_total = 0
+            for issue in issues:
+                comments = getter.fetch_jira_comments(issue["id"])
+                getter.store_jira_comments(issue["id"], comments)
+                comments_total += len(comments)
+                logging.info(f"Stored {len(issues)} Jira tickets and {comments_total} comments in {cfg.db_path}")
+        except Exception:  # noqa: BLE001
+            logging.exception("Failed to fetch or store Jira commets")
     else:
         logging.error("Jira configuration missing in config file.")
