@@ -1,5 +1,8 @@
 /.idea
 /TeamSupport_*
+<<<<<<< Updated upstream
 /__pycache__
+=======
+>>>>>>> Stashed changes
 /BDKfull
 /NewSupportStatsGetter
