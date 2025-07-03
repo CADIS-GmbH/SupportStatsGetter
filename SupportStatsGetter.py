@@ -1,12 +1,9 @@
 """SupportStatsGetter
-=====================
+====================
 
-This module provides a structured starting point for collecting support ticket
-statistics from TeamSupport or Jira Service Management. It mirrors a subset of
-the functionality found in ``TeamSupportStatsGetter.py`` but replaces JSON file
-output with normalized SQLite storage. The code is organised so that future
-extensions such as KPI calculation, legacy data import, configurable
-parameters and a GUI can be added easily.
+Tool for collecting ticket statistics from **Jira Service Management**.
+The data is stored in a normalized SQLite database. The code is based on
+``TeamSupportStatsGetter.py`` but no longer supports TeamSupport.
 """
 
 from __future__ import annotations
@@ -32,24 +29,20 @@ from sqlalchemy.engine import Engine
 class Config:
     """Runtime configuration values."""
 
-    base_url: str | None = None
-    username: str | None = None
-    password: str | None = None
     db_path: Path = Path("support_stats.sqlite")
     jira_base_url: str | None = None
     jira_user: str | None = None
     jira_token: str | None = None
 
     @staticmethod
-    def from_args(args: argparse.Namespace) -> "Config":
+    def load(path: Path) -> "Config":
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
         return Config(
-            base_url=args.base_url,
-            username=args.username,
-            password=args.password,
-            db_path=Path(args.db_path),
-            jira_base_url=args.jira_base_url,
-            jira_user=args.jira_user,
-            jira_token=args.jira_token,
+            db_path=Path(data.get("db_path", "support_stats.sqlite")),
+            jira_base_url=data.get("jira_base_url"),
+            jira_user=data.get("jira_user"),
+            jira_token=data.get("jira_token"),
         )
 
 
@@ -62,33 +55,6 @@ class SQLiteStore:
         self._prepare_schema()
 
     def _prepare_schema(self) -> None:
-        self.tickets = Table(
-            "tickets", self.meta,
-            Column("id", String, primary_key=True),
-            Column("ticket_number", String),
-            Column("name", Text),
-            Column("status", String),
-            Column("date_created", DateTime),
-            Column("date_modified", DateTime),
-            Column("resolved_date", DateTime, nullable=True),
-        )
-        self.actions = Table(
-            "actions", self.meta,
-            Column("id", String, primary_key=True),
-            Column("ticket_id", ForeignKey("tickets.id")),
-            Column("description", Text),
-            Column("date_created", DateTime),
-            Column("is_visible", Boolean),
-            Column("time_spent", Integer),
-        )
-        self.history = Table(
-            "history", self.meta,
-            Column("id", String, primary_key=True),
-            Column("ticket_id", ForeignKey("tickets.id")),
-            Column("description", Text),
-            Column("date_modified", DateTime),
-        )
-
         self.jira_tickets = Table(
             "jira_tickets", self.meta,
             Column("id", String, primary_key=True),
@@ -98,7 +64,6 @@ class SQLiteStore:
             Column("created", DateTime),
             Column("resolved", DateTime, nullable=True),
         )
-
         self.meta.create_all(self.engine)
 
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
@@ -108,29 +73,8 @@ class SQLiteStore:
             conn.execute(table.insert().prefix_with("OR REPLACE"), list(rows))
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Command line options mirroring the legacy script."""
-    parser = argparse.ArgumentParser(description="Collect support statistics")
-    parser.add_argument("--username", "-u", help="Basic auth user name")
-    parser.add_argument("--password", "-p", help="Basic auth password")
-    parser.add_argument("--base_url", "-b", help="Base url of the TeamSupport system")
-    parser.add_argument("--data_dir", "-d", default="./cadis_data",
-                        help="Directory for legacy data import")
-    parser.add_argument("--company", "-c", help="Company identifier")
-    parser.add_argument("--initial_start_date", "-s", default="2023-01-01",
-                        help="Initial start date (unused)")
-    parser.add_argument("--recalculate_only", action="store_true",
-                        help="Only recalculate existing data store")
-    parser.add_argument("--db_path", default="support_stats.sqlite",
-                        help="SQLite database file")
-    parser.add_argument("--jira_base_url", help="Jira Service Management base URL")
-    parser.add_argument("--jira_user", help="Jira user/email")
-    parser.add_argument("--jira_token", help="Jira API token")
-    return parser.parse_args()
-
-
 class SupportStatsGetter:
-    """Retrieve ticket data and store it in SQLite."""
+    """Retrieve Jira ticket data and store it in SQLite."""
 
     def __init__(self, config: Config):
         self.config = config
@@ -156,21 +100,6 @@ class SupportStatsGetter:
             issue["resolved"] = self._parse_ts(fields.get("resolutiondate"))
         return issues
 
-    def store_tickets(self, tickets: Iterable[dict[str, Any]]) -> None:
-        records = [
-            {
-                "id": t["ID"],
-                "ticket_number": t.get("TicketNumber"),
-                "name": t.get("Name"),
-                "status": t.get("Status"),
-                "date_created": t.get("date_created"),
-                "date_modified": t.get("date_modified"),
-                "resolved_date": t.get("resolved_date"),
-            }
-            for t in tickets
-        ]
-        self.store.insert_many(self.store.tickets, records)
-
     def store_jira_tickets(self, issues: Iterable[dict[str, Any]]) -> None:
         records = [
             {
@@ -194,12 +123,24 @@ class SupportStatsGetter:
 
 
 if __name__ == "__main__":
-    args = parse_arguments()
-    cfg = Config.from_args(args)
-    getter = SupportStatsGetter(cfg)
-    if cfg.jira_base_url:
-        issues = getter.fetch_jira_tickets()
-        getter.store_jira_tickets(issues)
-        print(f"Stored {len(issues)} Jira tickets in {cfg.db_path}")
+    parser = argparse.ArgumentParser(description="Collect Jira ticket statistics")
+    parser.add_argument(
+        "--config",
+        "-c",
+        default="config.json",
+        help="Path to the configuration JSON file",
+    )
+    args = parser.parse_args()
+
+    cfg_path = Path(args.config)
+    if cfg_path.exists():
+        cfg = Config.load(cfg_path)
+        getter = SupportStatsGetter(cfg)
+        if cfg.jira_base_url:
+            issues = getter.fetch_jira_tickets()
+            getter.store_jira_tickets(issues)
+            print(f"Stored {len(issues)} Jira tickets in {cfg.db_path}")
+        else:
+            print("Jira configuration missing in config file.")
     else:
-        print("No Jira base URL provided. Nothing to fetch.")
+        print(f"No configuration file found at {cfg_path}.")
