@@ -137,6 +137,21 @@ class SQLiteStore:
             Column("text", Text),
             Column("created", DateTime),
         )
+        self.jira_changelog = Table(
+            "jira_changelog",
+            self.meta,
+            Column("id", String, primary_key=True),
+            Column("history_id", String),
+            Column("ticket_id", String, ForeignKey("jira_tickets.id")),
+            Column("author", String),
+            Column("created", DateTime),
+            Column("field", String),
+            Column("fieldtype", String),
+            Column("from_value", String),
+            Column("from_string", String),
+            Column("to_value", String),
+            Column("to_string", String),
+        )
         self.meta.create_all(self.engine)
 
         inspector = sa_inspect(self.engine)
@@ -267,6 +282,39 @@ class SupportStatsGetter:
         return all_logs
 
     @log_call
+    def fetch_jira_changelog(self, issue_id_or_key: str) -> list[dict[str, Any]]:
+        """Fetch the changelog for a Jira issue (handles pagination)."""
+        if not self.config.jira_base_url:
+            raise ValueError("jira_base_url not configured")
+
+        url = f"{self.config.jira_base_url}/rest/api/3/issue/{issue_id_or_key}/changelog"
+        start_at = 0
+        max_results = 50
+        all_changes: list[dict[str, Any]] = []
+
+        while True:
+            params = {"startAt": start_at, "maxResults": max_results}
+            r = requests.get(
+                url,
+                params=params,
+                auth=self._jira_auth(),
+                headers={"Accept": "application/json"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            histories = data.get("values") or data.get("histories", [])
+            for hist in histories:
+                hist["created"] = self._parse_ts(hist.get("created"))
+            all_changes.extend(histories)
+
+            total = data.get("total", 0)
+            if start_at + len(histories) >= total or not histories:
+                break
+            start_at += len(histories)
+
+        return all_changes
+
+    @log_call
     def fetch_jira_tickets(self, jql: str = "", updated_since: datetime.datetime | None = None) -> list[dict[str, Any]]:
         """Fetch issues from Jira using the search API (handles pagination)."""
         if not self.config.jira_base_url:
@@ -381,6 +429,31 @@ class SupportStatsGetter:
             )
         self.store.insert_many(self.store.jira_worklogs, records)
 
+    def store_jira_changelog(self, issue_id: str, changelog: Iterable[dict[str, Any]]) -> None:
+        records = []
+        for hist in changelog:
+            history_id = hist.get("id")
+            author = hist.get("author", {}).get("displayName")
+            created = hist.get("created")
+            items = hist.get("items", [])
+            for idx, item in enumerate(items):
+                records.append(
+                    {
+                        "id": f"{history_id}-{idx}",
+                        "history_id": history_id,
+                        "ticket_id": issue_id,
+                        "author": author,
+                        "created": created,
+                        "field": item.get("field"),
+                        "fieldtype": item.get("fieldtype"),
+                        "from_value": item.get("from"),
+                        "from_string": item.get("fromString"),
+                        "to_value": item.get("to"),
+                        "to_string": item.get("toString"),
+                    }
+                )
+        self.store.insert_many(self.store.jira_changelog, records)
+
     @staticmethod
     def _parse_ts(value: str | None) -> datetime.datetime | None:
         if not value:
@@ -426,6 +499,7 @@ if __name__ == "__main__":
         try:
             comments_total = 0
             worklogs_total = 0
+            changelog_total = 0
             for issue in issues:
                 comments = getter.fetch_jira_comments(issue["id"])
                 getter.store_jira_comments(issue["id"], issue.get("key"), comments)
@@ -433,8 +507,12 @@ if __name__ == "__main__":
                 worklogs = getter.fetch_jira_worklogs(issue["id"])
                 getter.store_jira_worklogs(issue["id"], worklogs)
                 worklogs_total += len(worklogs)
+                changelog = getter.fetch_jira_changelog(issue["id"])
+                getter.store_jira_changelog(issue["id"], changelog)
+                for hist in changelog:
+                    changelog_total += len(hist.get("items", []))
             logging.info(
-                f"Stored {len(issues)} Jira tickets, {comments_total} comments and {worklogs_total} worklogs in {cfg.db_path}"
+                f"Stored {len(issues)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs and {changelog_total} changelog items in {cfg.db_path}"
             )
         except Exception:  # noqa: BLE001
             logging.exception("Failed to fetch or store Jira comments or worklogs")
