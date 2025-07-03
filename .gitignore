@@ -3,5 +3,5 @@
 /__pycache__
 /BDKfull
 /NewSupportStatsGetter
-config.*.json
-config.REF.json
+config_*.json
+*.sqlite
