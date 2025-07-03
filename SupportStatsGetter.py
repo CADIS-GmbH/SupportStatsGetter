@@ -24,7 +24,7 @@ import dateutil.parser
 import pytz
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, DateTime, Boolean,
-    Integer, Text, ForeignKey, select, func, text, inspect
+    Integer, Text, ForeignKey, select, func, text, inspect as sa_inspect
 )
 from sqlalchemy.engine import Engine
 
@@ -137,7 +137,7 @@ class SQLiteStore:
         )
         self.meta.create_all(self.engine)
 
-        inspector = inspect(self.engine)
+        inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
         if "updated" not in cols:
             with self.engine.begin() as conn:
@@ -157,7 +157,7 @@ class SQLiteStore:
 
     @log_call
     def newest_updated_ts(self) -> datetime.datetime | None:
-        inspector = inspect(self.engine)
+        inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
         if "updated" not in cols:
             return None
