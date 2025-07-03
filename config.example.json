@@ -3,5 +3,7 @@
   "jira_user": "your-email@example.com",
   "jira_token": "api-token",
   "db_path": "support_stats.sqlite",
-  "base_jql": "project = DEMO"
+  "base_jql": "project = DEMO",
+  "log_level": "INFO",
+  "log_file": "support_stats.log"
 }

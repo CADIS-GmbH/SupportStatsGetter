@@ -11,16 +11,18 @@ This project collects ticket statistics from **Jira Service Management** and sto
   "jira_user": "your-email@example.com",
   "jira_token": "api-token",
   "db_path": "support_stats.sqlite",
-  "base_jql": "project = DEMO"
+  "base_jql": "project = DEMO",
+  "log_level": "INFO",
+  "log_file": "support_stats.log"
 }
 ```
 2. Install the dependencies:
 ```bash
 pip install -r requirements.txt
 ```
-3. Run the script (optionally pass `--config` to specify the file):
+3. Run the script (optionally pass `--config` to specify the file and `--log-level` to override the configured log level):
 ```bash
-python SupportStatsGetter.py --config config.json
+python SupportStatsGetter.py --config config.json --log-level DEBUG
 ```
 Fetched tickets will be stored in the SQLite database specified in the config file.
 Subsequent runs only request tickets updated after the newest record already stored.
