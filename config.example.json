@@ -2,5 +2,6 @@
   "jira_base_url": "https://example.atlassian.net",
   "jira_user": "your-email@example.com",
   "jira_token": "api-token",
-  "db_path": "support_stats.sqlite"
+  "db_path": "support_stats.sqlite",
+  "base_jql": "project = DEMO"
 }

@@ -33,6 +33,7 @@ class Config:
     jira_base_url: str | None = None
     jira_user: str | None = None
     jira_token: str | None = None
+    base_jql: str | None = None
 
     @staticmethod
     def load(path: Path) -> "Config":
@@ -43,6 +44,7 @@ class Config:
             jira_base_url=data.get("jira_base_url"),
             jira_user=data.get("jira_user"),
             jira_token=data.get("jira_token"),
+            base_jql=data.get("base_jql"),
         )
 
 
@@ -86,19 +88,49 @@ class SupportStatsGetter:
         return None
 
     def fetch_jira_tickets(self, jql: str = "") -> list[dict[str, Any]]:
-        """Fetch issues from Jira using the search API."""
+        """Fetch issues from Jira using the search API (handles pagination)."""
         if not self.config.jira_base_url:
             raise ValueError("jira_base_url not configured")
+
+        base = self.config.base_jql or ""
+        extra = jql.strip()
+        if base and extra:
+            final_jql = f"{base} AND ({extra})"
+        else:
+            final_jql = base or extra
+
         url = f"{self.config.jira_base_url}/rest/api/3/search"
-        params = {"jql": jql or "", "maxResults": 50}
-        r = requests.get(url, params=params, auth=self._jira_auth(), headers={"Accept": "application/json"})
-        r.raise_for_status()
-        issues = r.json().get("issues", [])
-        for issue in issues:
-            fields = issue.get("fields", {})
-            issue["created"] = self._parse_ts(fields.get("created"))
-            issue["resolved"] = self._parse_ts(fields.get("resolutiondate"))
-        return issues
+        start_at = 0
+        max_results = 50
+        all_issues: list[dict[str, Any]] = []
+
+        while True:
+            params = {
+                "jql": final_jql,
+                "maxResults": max_results,
+                "startAt": start_at,
+            }
+            r = requests.get(
+                url,
+                params=params,
+                auth=self._jira_auth(),
+                headers={"Accept": "application/json"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            issues = data.get("issues", [])
+            for issue in issues:
+                fields = issue.get("fields", {})
+                issue["created"] = self._parse_ts(fields.get("created"))
+                issue["resolved"] = self._parse_ts(fields.get("resolutiondate"))
+            all_issues.extend(issues)
+
+            total = data.get("total", 0)
+            if start_at + len(issues) >= total or not issues:
+                break
+            start_at += len(issues)
+
+        return all_issues
 
     def store_jira_tickets(self, issues: Iterable[dict[str, Any]]) -> None:
         records = [
