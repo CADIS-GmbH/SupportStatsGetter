@@ -23,5 +23,6 @@ pip install -r requirements.txt
 python SupportStatsGetter.py --config config.json
 ```
 Fetched tickets will be stored in the SQLite database specified in the config file.
+Subsequent runs only request tickets updated after the newest record already stored.
 
 The script currently requires the `requests`, `pytz`, `dateutil` and `sqlalchemy` packages.

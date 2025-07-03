@@ -20,7 +20,7 @@ import dateutil.parser
 import pytz
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, DateTime, Boolean,
-    Integer, Text, ForeignKey
+    Integer, Text, ForeignKey, select, func, text, inspect
 )
 from sqlalchemy.engine import Engine
 
@@ -65,14 +65,30 @@ class SQLiteStore:
             Column("status", String),
             Column("created", DateTime),
             Column("resolved", DateTime, nullable=True),
+            Column("updated", DateTime),
         )
         self.meta.create_all(self.engine)
+
+        inspector = inspect(self.engine)
+        cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
+        if "updated" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN updated DATETIME"))
 
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
         if not rows:
             return
         with self.engine.begin() as conn:
             conn.execute(table.insert().prefix_with("OR REPLACE"), list(rows))
+
+    def newest_updated_ts(self) -> datetime.datetime | None:
+        inspector = inspect(self.engine)
+        cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
+        if "updated" not in cols:
+            return None
+        with self.engine.connect() as conn:
+            result = conn.execute(select(func.max(self.jira_tickets.c.updated))).scalar()
+        return result
 
 
 class SupportStatsGetter:
@@ -87,17 +103,25 @@ class SupportStatsGetter:
             return (self.config.jira_user, self.config.jira_token)
         return None
 
-    def fetch_jira_tickets(self, jql: str = "") -> list[dict[str, Any]]:
+    def latest_update_timestamp(self) -> datetime.datetime | None:
+        return self.store.newest_updated_ts()
+
+    def fetch_jira_tickets(self, jql: str = "", updated_since: datetime.datetime | None = None) -> list[dict[str, Any]]:
         """Fetch issues from Jira using the search API (handles pagination)."""
         if not self.config.jira_base_url:
             raise ValueError("jira_base_url not configured")
 
         base = self.config.base_jql or ""
+        parts = []
+        if base:
+            parts.append(base)
         extra = jql.strip()
-        if base and extra:
-            final_jql = f"{base} AND ({extra})"
-        else:
-            final_jql = base or extra
+        if extra:
+            parts.append(f"({extra})")
+        if updated_since:
+            ts = updated_since.astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M")
+            parts.append(f"updated >= \"{ts}\"")
+        final_jql = " AND ".join(parts)
 
         url = f"{self.config.jira_base_url}/rest/api/3/search"
         start_at = 0
@@ -123,6 +147,7 @@ class SupportStatsGetter:
                 fields = issue.get("fields", {})
                 issue["created"] = self._parse_ts(fields.get("created"))
                 issue["resolved"] = self._parse_ts(fields.get("resolutiondate"))
+                issue["updated"] = self._parse_ts(fields.get("updated"))
             all_issues.extend(issues)
 
             total = data.get("total", 0)
@@ -141,6 +166,7 @@ class SupportStatsGetter:
                 "status": issue.get("fields", {}).get("status", {}).get("name"),
                 "created": issue.get("created"),
                 "resolved": issue.get("resolved"),
+                "updated": issue.get("updated"),
             }
             for issue in issues
         ]
@@ -169,7 +195,8 @@ if __name__ == "__main__":
         cfg = Config.load(cfg_path)
         getter = SupportStatsGetter(cfg)
         if cfg.jira_base_url:
-            issues = getter.fetch_jira_tickets()
+            since = getter.latest_update_timestamp()
+            issues = getter.fetch_jira_tickets(updated_since=since)
             getter.store_jira_tickets(issues)
             print(f"Stored {len(issues)} Jira tickets in {cfg.db_path}")
         else:
