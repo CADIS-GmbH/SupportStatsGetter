@@ -120,8 +120,20 @@ class SQLiteStore:
             Column("ticket_id", String, ForeignKey("jira_tickets.id")),
             Column("author", String),
             Column("body", Text),
+            Column("public", Boolean, default=True),
             Column("created", DateTime),
             Column("updated", DateTime),
+        )
+        self.jira_worklogs = Table(
+            "jira_worklogs",
+            self.meta,
+            Column("id", String, primary_key=True),
+            Column("ticket_id", String, ForeignKey("jira_tickets.id")),
+            Column("author", String),
+            Column("time_spent_seconds", Integer),
+            Column("started", DateTime),
+            Column("text", Text),
+            Column("created", DateTime),
         )
         self.meta.create_all(self.engine)
 
@@ -130,6 +142,11 @@ class SQLiteStore:
         if "updated" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN updated DATETIME"))
+
+        cols = [c["name"] for c in inspector.get_columns("jira_comments")]
+        if "public" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_comments ADD COLUMN public BOOLEAN"))
 
     @log_call
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
@@ -192,6 +209,7 @@ class SupportStatsGetter:
             for comment in comments:
                 comment["created"] = self._parse_ts(comment.get("created"))
                 comment["updated"] = self._parse_ts(comment.get("updated"))
+                comment["public"] = comment.get("jsdPublic")
             all_comments.extend(comments)
 
             total = data.get("total", 0)
@@ -200,6 +218,41 @@ class SupportStatsGetter:
             start_at += len(comments)
 
         return all_comments
+
+    @log_call
+    def fetch_jira_worklogs(self, issue_id_or_key: str) -> list[dict[str, Any]]:
+        """Fetch all worklogs for a Jira issue (handles pagination)."""
+        if not self.config.jira_base_url:
+            raise ValueError("jira_base_url not configured")
+
+        url = f"{self.config.jira_base_url}/rest/api/3/issue/{issue_id_or_key}/worklog"
+        start_at = 0
+        max_results = 50
+        all_logs: list[dict[str, Any]] = []
+
+        while True:
+            params = {"startAt": start_at, "maxResults": max_results}
+            r = requests.get(
+                url,
+                params=params,
+                auth=self._jira_auth(),
+                headers={"Accept": "application/json"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            logs = data.get("worklogs", [])
+            for log in logs:
+                log["created"] = self._parse_ts(log.get("created"))
+                log["updated"] = self._parse_ts(log.get("updated"))
+                log["started"] = self._parse_ts(log.get("started"))
+            all_logs.extend(logs)
+
+            total = data.get("total", 0)
+            if start_at + len(logs) >= total or not logs:
+                break
+            start_at += len(logs)
+
+        return all_logs
 
     @log_call
     def fetch_jira_tickets(self, jql: str = "", updated_since: datetime.datetime | None = None) -> list[dict[str, Any]]:
@@ -283,11 +336,31 @@ class SupportStatsGetter:
                     "ticket_id": issue_id,
                     "author": comment.get("author", {}).get("displayName"),
                     "body": body,
+                    "public": comment.get("public"),
                     "created": comment.get("created"),
                     "updated": comment.get("updated"),
                 }
             )
         self.store.insert_many(self.store.jira_comments, records)
+
+    def store_jira_worklogs(self, issue_id: str, worklogs: Iterable[dict[str, Any]]) -> None:
+        records = []
+        for log in worklogs:
+            text = log.get("comment")
+            if isinstance(text, dict):
+                text = json.dumps(text)
+            records.append(
+                {
+                    "id": log.get("id"),
+                    "ticket_id": issue_id,
+                    "author": log.get("author", {}).get("displayName"),
+                    "time_spent_seconds": log.get("timeSpentSeconds"),
+                    "started": log.get("started"),
+                    "text": text,
+                    "created": log.get("created"),
+                }
+            )
+        self.store.insert_many(self.store.jira_worklogs, records)
 
     @staticmethod
     @log_call
@@ -334,12 +407,18 @@ if __name__ == "__main__":
             logging.exception("Failed to fetch or store Jira tickets")
         try:
             comments_total = 0
+            worklogs_total = 0
             for issue in issues:
                 comments = getter.fetch_jira_comments(issue["id"])
                 getter.store_jira_comments(issue["id"], comments)
                 comments_total += len(comments)
-                logging.info(f"Stored {len(issues)} Jira tickets and {comments_total} comments in {cfg.db_path}")
+                worklogs = getter.fetch_jira_worklogs(issue["id"])
+                getter.store_jira_worklogs(issue["id"], worklogs)
+                worklogs_total += len(worklogs)
+            logging.info(
+                f"Stored {len(issues)} Jira tickets, {comments_total} comments and {worklogs_total} worklogs in {cfg.db_path}"
+            )
         except Exception:  # noqa: BLE001
-            logging.exception("Failed to fetch or store Jira commets")
+            logging.exception("Failed to fetch or store Jira comments or worklogs")
     else:
         logging.error("Jira configuration missing in config file.")
