@@ -382,7 +382,6 @@ class SupportStatsGetter:
         self.store.insert_many(self.store.jira_worklogs, records)
 
     @staticmethod
-    @log_call
     def _parse_ts(value: str | None) -> datetime.datetime | None:
         if not value:
             return None
