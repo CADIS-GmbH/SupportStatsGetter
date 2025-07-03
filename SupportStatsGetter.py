@@ -11,9 +11,10 @@ parameters and a GUI can be added easily.
 
 from __future__ import annotations
 
+import argparse
 import json
 import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -31,26 +32,24 @@ from sqlalchemy.engine import Engine
 class Config:
     """Runtime configuration values."""
 
-    base_url: str
-    username: str
-    password: str
+    base_url: str | None = None
+    username: str | None = None
+    password: str | None = None
     db_path: Path = Path("support_stats.sqlite")
     jira_base_url: str | None = None
     jira_user: str | None = None
     jira_token: str | None = None
 
     @staticmethod
-    def load(path: Path) -> "Config":
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    def from_args(args: argparse.Namespace) -> "Config":
         return Config(
-            base_url=data["base_url"],
-            username=data["username"],
-            password=data["password"],
-            db_path=Path(data.get("db_path", "support_stats.sqlite")),
-            jira_base_url=data.get("jira_base_url"),
-            jira_user=data.get("jira_user"),
-            jira_token=data.get("jira_token"),
+            base_url=args.base_url,
+            username=args.username,
+            password=args.password,
+            db_path=Path(args.db_path),
+            jira_base_url=args.jira_base_url,
+            jira_user=args.jira_user,
+            jira_token=args.jira_token,
         )
 
 
@@ -107,6 +106,27 @@ class SQLiteStore:
             conn.execute(table.insert().prefix_with("OR REPLACE"), list(rows))
 
 
+def parse_arguments() -> argparse.Namespace:
+    """Command line options mirroring the legacy script."""
+    parser = argparse.ArgumentParser(description="Collect support statistics")
+    parser.add_argument("--username", "-u", help="Basic auth user name")
+    parser.add_argument("--password", "-p", help="Basic auth password")
+    parser.add_argument("--base_url", "-b", help="Base url of the TeamSupport system")
+    parser.add_argument("--data_dir", "-d", default="./cadis_data",
+                        help="Directory for legacy data import")
+    parser.add_argument("--company", "-c", help="Company identifier")
+    parser.add_argument("--initial_start_date", "-s", default="2023-01-01",
+                        help="Initial start date (unused)")
+    parser.add_argument("--recalculate_only", action="store_true",
+                        help="Only recalculate existing data store")
+    parser.add_argument("--db_path", default="support_stats.sqlite",
+                        help="SQLite database file")
+    parser.add_argument("--jira_base_url", help="Jira Service Management base URL")
+    parser.add_argument("--jira_user", help="Jira user/email")
+    parser.add_argument("--jira_token", help="Jira API token")
+    return parser.parse_args()
+
+
 class SupportStatsGetter:
     """Retrieve ticket data and store it in SQLite."""
 
@@ -114,25 +134,10 @@ class SupportStatsGetter:
         self.config = config
         self.store = SQLiteStore(create_engine(f"sqlite+pysqlite:///{config.db_path}"))
 
-    def _auth_header(self) -> dict[str, str]:
-        token = f"{self.config.username}:{self.config.password}".encode("utf-8")
-        return {"Authorization": "Basic " + token.decode("base64"), "accept": "application/json"}
-
     def _jira_auth(self) -> tuple[str, str] | None:
         if self.config.jira_user and self.config.jira_token:
             return (self.config.jira_user, self.config.jira_token)
         return None
-
-    def fetch_tickets(self) -> list[dict[str, Any]]:
-        url = f"{self.config.base_url}/api/json/Tickets"
-        r = requests.get(url, headers=self._auth_header())
-        r.raise_for_status()
-        tickets = r.json().get("Tickets", [])
-        for t in tickets:
-            t["date_created"] = self._parse_ts(t.get("DateCreated"))
-            t["date_modified"] = self._parse_ts(t.get("DateModified"))
-            t["resolved_date"] = self._parse_ts(t.get("ResolvedDate"))
-        return tickets
 
     def fetch_jira_tickets(self, jql: str = "") -> list[dict[str, Any]]:
         """Fetch issues from Jira using the search API."""
@@ -187,17 +192,12 @@ class SupportStatsGetter:
 
 
 if __name__ == "__main__":
-    cfg_path = Path("config.json")
-    if cfg_path.exists():
-        cfg = Config.load(cfg_path)
-        getter = SupportStatsGetter(cfg)
-        if cfg.jira_base_url:
-            issues = getter.fetch_jira_tickets()
-            getter.store_jira_tickets(issues)
-            print(f"Stored {len(issues)} Jira tickets in {cfg.db_path}")
-        else:
-            tickets = getter.fetch_tickets()
-            getter.store_tickets(tickets)
-            print(f"Stored {len(tickets)} tickets in {cfg.db_path}")
+    args = parse_arguments()
+    cfg = Config.from_args(args)
+    getter = SupportStatsGetter(cfg)
+    if cfg.jira_base_url:
+        issues = getter.fetch_jira_tickets()
+        getter.store_jira_tickets(issues)
+        print(f"Stored {len(issues)} Jira tickets in {cfg.db_path}")
     else:
-        print("No configuration file found. Please create 'config.json'.")
+        print("No Jira base URL provided. Nothing to fetch.")
