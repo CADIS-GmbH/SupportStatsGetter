@@ -39,4 +39,17 @@ Each comment is stored in the `jira_comments` table with the following columns:
 - `body` - the comment text rendered as HTML
 - `created` / `updated` - timestamps
 
+Changelog entries are stored in the `jira_changelog` table. Each row represents
+a single field change from the issue history:
+
+- `id` - combination of the history id and item index
+- `history_id` - identifier of the history entry returned by Jira
+- `ticket_id` - internal issue ID
+- `author` - display name of the user who made the change
+- `created` - timestamp of the change
+- `field` - the field that changed
+- `fieldtype` - Jira field type
+- `from_value` / `to_value` - raw values as provided by the API
+- `from_string` / `to_string` - human readable values
+
 The script currently requires the `requests`, `pytz`, `dateutil` and `sqlalchemy` packages.
