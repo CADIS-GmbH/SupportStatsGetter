@@ -16,6 +16,7 @@ import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+import argparse
 
 import requests
 import dateutil.parser
@@ -138,7 +139,16 @@ class SupportStatsGetter:
 
 
 if __name__ == "__main__":
-    cfg_path = Path("config.json")
+    parser = argparse.ArgumentParser(description="Collect ticket statistics from TeamSupport")
+    parser.add_argument(
+        "--config",
+        "-c",
+        default="config.json",
+        help="Path to the configuration JSON file"
+    )
+    args = parser.parse_args()
+
+    cfg_path = Path(args.config)
     if cfg_path.exists():
         cfg = Config.load(cfg_path)
         getter = SupportStatsGetter(cfg)
@@ -146,4 +156,4 @@ if __name__ == "__main__":
         getter.store_tickets(tickets)
         print(f"Stored {len(tickets)} tickets in {cfg.db_path}")
     else:
-        print("No configuration file found. Please create 'config.json'.")
+        print(f"No configuration file found at {cfg_path}.")

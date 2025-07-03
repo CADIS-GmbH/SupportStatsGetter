@@ -8,7 +8,8 @@ a graphical user interface.
 
 ## Usage
 
-1. Create a `config.json` file with your credentials:
+1. Create a `config.json` file with your credentials.  A sample
+   configuration file is provided as `config.example.json`:
    ```json
    {
      "base_url": "https://example.teamsupport.com",
@@ -17,12 +18,14 @@ a graphical user interface.
      "db_path": "support_stats.sqlite"
    }
    ```
-2. Run the script:
+2. Install the dependencies:
    ```bash
-   python SupportStatsGetter.py
+   pip install -r requirements.txt
+   ```
+3. Run the script. You can specify an alternative config file with
+   `--config`:
+   ```bash
+   python SupportStatsGetter.py --config config.json
    ```
    Fetched tickets will be inserted into the SQLite database specified in the
    config file.
-
-The script currently requires the `requests`, `pytz`, `dateutil` and
-`sqlalchemy` packages.
