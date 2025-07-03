@@ -1,0 +1,6 @@
+{
+  "base_url": "https://example.teamsupport.com",
+  "username": "user",
+  "password": "pass",
+  "db_path": "support_stats.sqlite"
+}
