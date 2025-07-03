@@ -88,6 +88,7 @@ class SQLiteStore:
             Column("description", Text),
             Column("date_modified", DateTime),
         )
+
         self.jira_tickets = Table(
             "jira_tickets", self.meta,
             Column("id", String, primary_key=True),
@@ -97,6 +98,7 @@ class SQLiteStore:
             Column("created", DateTime),
             Column("resolved", DateTime, nullable=True),
         )
+
         self.meta.create_all(self.engine)
 
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:

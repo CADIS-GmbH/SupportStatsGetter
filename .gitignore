@@ -1,3 +1,7 @@
 /.idea
 /TeamSupport_*
 /__pycache__
+/BDKfull
+/NewSupportStatsGetter
+config.*.json
+config.REF.json
