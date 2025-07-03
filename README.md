@@ -26,5 +26,7 @@ python SupportStatsGetter.py --config config.json --log-level DEBUG
 ```
 Fetched tickets will be stored in the SQLite database specified in the config file.
 Subsequent runs only request tickets updated after the newest record already stored.
+Comments and worklogs for each ticket are downloaded and saved alongside the tickets.
+Comments include a `public` flag to indicate visibility in the service desk.
 
 The script currently requires the `requests`, `pytz`, `dateutil` and `sqlalchemy` packages.
