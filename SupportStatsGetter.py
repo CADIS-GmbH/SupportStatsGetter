@@ -52,7 +52,7 @@ def setup_logging(level: str, log_file: Path) -> None:
     logger.setLevel(numeric)
 
     formatter = logging.Formatter(
-        "%{asctime}s - %{name}s - %{levelname}s - %{message}s", style="%"
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
     console = logging.StreamHandler()

@@ -5,3 +5,4 @@
 /NewSupportStatsGetter
 config_*.json
 *.sqlite
+support_stats.log
