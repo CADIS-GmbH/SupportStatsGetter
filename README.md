@@ -4,13 +4,14 @@ This project collects ticket statistics from **Jira Service Management** and sto
 
 ## Usage
 
-1. Create a `config.json` file with your Jira credentials. A sample configuration is provided as `config.example.json`:
+1. Create a `config.json` file with your Jira credentials. You can optionally specify a base JQL query to limit the scope of fetched tickets. A sample configuration is provided as `config.example.json`:
 ```json
 {
   "jira_base_url": "https://example.atlassian.net",
   "jira_user": "your-email@example.com",
   "jira_token": "api-token",
-  "db_path": "support_stats.sqlite"
+  "db_path": "support_stats.sqlite",
+  "base_jql": "project = DEMO"
 }
 ```
 2. Install the dependencies:
