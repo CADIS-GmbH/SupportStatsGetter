@@ -8,6 +8,10 @@ The data is stored in a normalized SQLite database. The code is based on
 
 from __future__ import annotations
 
+import logging
+import functools
+import inspect
+
 import argparse
 import json
 import datetime
@@ -20,9 +24,44 @@ import dateutil.parser
 import pytz
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, DateTime, Boolean,
-    Integer, Text, ForeignKey, select, func, text, inspect
+    Integer, Text, ForeignKey, select, func, text, inspect as sa_inspect
 )
 from sqlalchemy.engine import Engine
+
+
+def log_call(func):
+    """Decorator to log function calls with parameters at DEBUG level."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        bound = inspect.signature(func).bind_partial(*args, **kwargs)
+        bound.apply_defaults()
+        params = ", ".join(
+            f"{k}={v!r}" for k, v in bound.arguments.items() if k != "self"
+        )
+        logging.getLogger(func.__module__).debug(f"{func.__name__}({params})")
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+def setup_logging(level: str, log_file: Path) -> None:
+    """Configure root logger with console and file handlers."""
+    numeric = getattr(logging, level.upper(), logging.INFO)
+    logger = logging.getLogger()
+    logger.setLevel(numeric)
+
+    formatter = logging.Formatter(
+        "%{asctime}s - %{name}s - %{levelname}s - %{message}s", style="%"
+    )
+
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    logger.addHandler(console)
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
 
 @dataclass
@@ -34,8 +73,11 @@ class Config:
     jira_user: str | None = None
     jira_token: str | None = None
     base_jql: str | None = None
+    log_level: str = "INFO"
+    log_file: Path = Path("support_stats.log")
 
     @staticmethod
+    @log_call
     def load(path: Path) -> "Config":
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -45,17 +87,21 @@ class Config:
             jira_user=data.get("jira_user"),
             jira_token=data.get("jira_token"),
             base_jql=data.get("base_jql"),
+            log_level=data.get("log_level", "INFO"),
+            log_file=Path(data.get("log_file", "support_stats.log")),
         )
 
 
 class SQLiteStore:
     """Simple wrapper around an SQLite database using SQLAlchemy."""
 
+    @log_call
     def __init__(self, engine: Engine | None = None):
         self.engine = engine or create_engine("sqlite+pysqlite:///support_stats.sqlite")
         self.meta = MetaData()
         self._prepare_schema()
 
+    @log_call
     def _prepare_schema(self) -> None:
         self.jira_tickets = Table(
             "jira_tickets", self.meta,
@@ -72,27 +118,54 @@ class SQLiteStore:
             self.meta,
             Column("id", String, primary_key=True),
             Column("ticket_id", String, ForeignKey("jira_tickets.id")),
+            Column("issue_key", String),
             Column("author", String),
+            Column("type", String),
             Column("body", Text),
+            Column("public", Boolean, default=True),
             Column("created", DateTime),
             Column("updated", DateTime),
         )
+        self.jira_worklogs = Table(
+            "jira_worklogs",
+            self.meta,
+            Column("id", String, primary_key=True),
+            Column("ticket_id", String, ForeignKey("jira_tickets.id")),
+            Column("author", String),
+            Column("time_spent_seconds", Integer),
+            Column("started", DateTime),
+            Column("text", Text),
+            Column("created", DateTime),
+        )
         self.meta.create_all(self.engine)
 
-        inspector = inspect(self.engine)
+        inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
         if "updated" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN updated DATETIME"))
 
+        cols = [c["name"] for c in inspector.get_columns("jira_comments")]
+        if "public" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_comments ADD COLUMN public BOOLEAN"))
+        if "issue_key" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_comments ADD COLUMN issue_key VARCHAR"))
+        if "type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_comments ADD COLUMN type VARCHAR"))
+
+    @log_call
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
         if not rows:
             return
         with self.engine.begin() as conn:
             conn.execute(table.insert().prefix_with("OR REPLACE"), list(rows))
 
+    @log_call
     def newest_updated_ts(self) -> datetime.datetime | None:
-        inspector = inspect(self.engine)
+        inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
         if "updated" not in cols:
             return None
@@ -104,18 +177,22 @@ class SQLiteStore:
 class SupportStatsGetter:
     """Retrieve Jira ticket data and store it in SQLite."""
 
+    @log_call
     def __init__(self, config: Config):
         self.config = config
         self.store = SQLiteStore(create_engine(f"sqlite+pysqlite:///{config.db_path}"))
 
+    @log_call
     def _jira_auth(self) -> tuple[str, str] | None:
         if self.config.jira_user and self.config.jira_token:
             return (self.config.jira_user, self.config.jira_token)
         return None
 
+    @log_call
     def latest_update_timestamp(self) -> datetime.datetime | None:
         return self.store.newest_updated_ts()
 
+    @log_call
     def fetch_jira_comments(self, issue_id_or_key: str) -> list[dict[str, Any]]:
         """Fetch all comments for a Jira issue (handles pagination)."""
         if not self.config.jira_base_url:
@@ -127,7 +204,11 @@ class SupportStatsGetter:
         all_comments: list[dict[str, Any]] = []
 
         while True:
-            params = {"startAt": start_at, "maxResults": max_results}
+            params = {
+                "startAt": start_at,
+                "maxResults": max_results,
+                "expand": "renderedBody",
+            }
             r = requests.get(
                 url,
                 params=params,
@@ -140,6 +221,7 @@ class SupportStatsGetter:
             for comment in comments:
                 comment["created"] = self._parse_ts(comment.get("created"))
                 comment["updated"] = self._parse_ts(comment.get("updated"))
+                comment["public"] = comment.get("jsdPublic")
             all_comments.extend(comments)
 
             total = data.get("total", 0)
@@ -149,9 +231,46 @@ class SupportStatsGetter:
 
         return all_comments
 
+    @log_call
+    def fetch_jira_worklogs(self, issue_id_or_key: str) -> list[dict[str, Any]]:
+        """Fetch all worklogs for a Jira issue (handles pagination)."""
+        if not self.config.jira_base_url:
+            raise ValueError("jira_base_url not configured")
+
+        url = f"{self.config.jira_base_url}/rest/api/3/issue/{issue_id_or_key}/worklog"
+        start_at = 0
+        max_results = 50
+        all_logs: list[dict[str, Any]] = []
+
+        while True:
+            params = {"startAt": start_at, "maxResults": max_results}
+            r = requests.get(
+                url,
+                params=params,
+                auth=self._jira_auth(),
+                headers={"Accept": "application/json"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            logs = data.get("worklogs", [])
+            for log in logs:
+                log["created"] = self._parse_ts(log.get("created"))
+                log["updated"] = self._parse_ts(log.get("updated"))
+                log["started"] = self._parse_ts(log.get("started"))
+            all_logs.extend(logs)
+
+            total = data.get("total", 0)
+            if start_at + len(logs) >= total or not logs:
+                break
+            start_at += len(logs)
+
+        return all_logs
+
+    @log_call
     def fetch_jira_tickets(self, jql: str = "", updated_since: datetime.datetime | None = None) -> list[dict[str, Any]]:
         """Fetch issues from Jira using the search API (handles pagination)."""
         if not self.config.jira_base_url:
+            logging.getLogger(__name__).error("jira_base_url not configured")
             raise ValueError("jira_base_url not configured")
 
         base = self.config.base_jql or ""
@@ -177,6 +296,7 @@ class SupportStatsGetter:
                 "maxResults": max_results,
                 "startAt": start_at,
             }
+            logging.getLogger(__name__).info(f"GET {url} params={params}")
             r = requests.get(
                 url,
                 params=params,
@@ -200,6 +320,7 @@ class SupportStatsGetter:
 
         return all_issues
 
+    @log_call
     def store_jira_tickets(self, issues: Iterable[dict[str, Any]]) -> None:
         records = [
             {
@@ -215,25 +336,53 @@ class SupportStatsGetter:
         ]
         self.store.insert_many(self.store.jira_tickets, records)
 
-    def store_jira_comments(self, issue_id: str, comments: Iterable[dict[str, Any]]) -> None:
+    def store_jira_comments(self, issue_id: str, issue_key: str, comments: Iterable[dict[str, Any]]) -> None:
         records = []
         for comment in comments:
-            body = comment.get("body")
+            body = comment.get("renderedBody") or comment.get("body")
             if isinstance(body, dict):
                 body = json.dumps(body)
+            comment_type = None
+            if isinstance(comment.get("body"), dict):
+                comment_type = comment.get("body", {}).get("type")
+            else:
+                comment_type = comment.get("type")
             records.append(
                 {
                     "id": comment.get("id"),
                     "ticket_id": issue_id,
+                    "issue_key": issue_key,
                     "author": comment.get("author", {}).get("displayName"),
+                    "type": comment_type,
                     "body": body,
+                    "public": comment.get("public"),
                     "created": comment.get("created"),
                     "updated": comment.get("updated"),
                 }
             )
         self.store.insert_many(self.store.jira_comments, records)
 
+    def store_jira_worklogs(self, issue_id: str, worklogs: Iterable[dict[str, Any]]) -> None:
+        records = []
+        for log in worklogs:
+            text = log.get("comment")
+            if isinstance(text, dict):
+                text = json.dumps(text)
+            records.append(
+                {
+                    "id": log.get("id"),
+                    "ticket_id": issue_id,
+                    "author": log.get("author", {}).get("displayName"),
+                    "time_spent_seconds": log.get("timeSpentSeconds"),
+                    "started": log.get("started"),
+                    "text": text,
+                    "created": log.get("created"),
+                }
+            )
+        self.store.insert_many(self.store.jira_worklogs, records)
+
     @staticmethod
+    @log_call
     def _parse_ts(value: str | None) -> datetime.datetime | None:
         if not value:
             return None
@@ -249,25 +398,46 @@ if __name__ == "__main__":
         default="config.json",
         help="Path to the configuration JSON file",
     )
+    parser.add_argument(
+        "--log-level",
+        help="Logging level (overrides config)",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+    )
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
-    if cfg_path.exists():
-        cfg = Config.load(cfg_path)
-        getter = SupportStatsGetter(cfg)
-        if cfg.jira_base_url:
+    if not cfg_path.exists():
+        logging.basicConfig(level=logging.ERROR)
+        logging.error(f"No configuration file found at {cfg_path}.")
+        raise SystemExit(1)
+
+    cfg = Config.load(cfg_path)
+    log_level = args.log_level or cfg.log_level
+    setup_logging(log_level, cfg.log_file)
+
+    getter = SupportStatsGetter(cfg)
+    if cfg.jira_base_url:
+        try:
             since = getter.latest_update_timestamp()
             issues = getter.fetch_jira_tickets(updated_since=since)
             getter.store_jira_tickets(issues)
+            logging.info(f"Stored {len(issues)} Jira tickets in {cfg.db_path}")
+        except Exception:  # noqa: BLE001
+            logging.exception("Failed to fetch or store Jira tickets")
+        try:
             comments_total = 0
+            worklogs_total = 0
             for issue in issues:
                 comments = getter.fetch_jira_comments(issue["id"])
-                getter.store_jira_comments(issue["id"], comments)
+                getter.store_jira_comments(issue["id"], issue.get("key"), comments)
                 comments_total += len(comments)
-            print(
-                f"Stored {len(issues)} Jira tickets and {comments_total} comments in {cfg.db_path}"
+                worklogs = getter.fetch_jira_worklogs(issue["id"])
+                getter.store_jira_worklogs(issue["id"], worklogs)
+                worklogs_total += len(worklogs)
+            logging.info(
+                f"Stored {len(issues)} Jira tickets, {comments_total} comments and {worklogs_total} worklogs in {cfg.db_path}"
             )
-        else:
-            print("Jira configuration missing in config file.")
+        except Exception:  # noqa: BLE001
+            logging.exception("Failed to fetch or store Jira comments or worklogs")
     else:
-        print(f"No configuration file found at {cfg_path}.")
+        logging.error("Jira configuration missing in config file.")
