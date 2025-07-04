@@ -273,7 +273,75 @@ class SQLiteStore:
             self.meta,
             Column("pattern", String, primary_key=True),
         )
+        self.week_reporting = Table(
+            "week_reporting",
+            self.meta,
+            Column("calendar_week", String, primary_key=True),
+            Column("reporting_month", String),
+            Column("reporting_quarter", String),
+        )
         self.meta.create_all(self.engine)
+
+        # populate week to reporting month/quarter lookup
+        with self.engine.begin() as conn:
+            count = conn.execute(select(func.count()).select_from(self.week_reporting)).scalar()
+            if count == 0:
+                rows = []
+                for week in range(1, 53):
+                    if week <= 5:
+                        month = 1
+                    elif week <= 9:
+                        month = 2
+                    elif week <= 13:
+                        month = 3
+                    elif week <= 17:
+                        month = 4
+                    elif week <= 22:
+                        month = 5
+                    elif week <= 26:
+                        month = 6
+                    elif week <= 31:
+                        month = 7
+                    elif week <= 35:
+                        month = 8
+                    elif week <= 39:
+                        month = 9
+                    elif week <= 44:
+                        month = 10
+                    elif week <= 48:
+                        month = 11
+                    else:
+                        month = 12
+                    quarter = (month - 1) // 3 + 1
+                    rows.append(
+                        {
+                            "calendar_week": f"2025.{week:02}",
+                            "reporting_month": f"2025.{month:02}",
+                            "reporting_quarter": f"2025.Q{quarter}",
+                        }
+                    )
+                conn.execute(self.week_reporting.insert(), rows)
+
+        # create a view exposing reporting month and quarter columns
+        view_sql = """
+            CREATE VIEW IF NOT EXISTS jira_tickets_reporting AS
+            SELECT
+                jt.*, 
+                (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingmonth,
+                (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingquarter,
+                (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.resolved_week) AS resolved_reportingmonth,
+                (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.resolved_week) AS resolved_reportingquarter,
+                (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.updated_week) AS updated_reportingmonth,
+                (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.updated_week) AS updated_reportingquarter,
+                (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.first_response_date_week) AS first_response_date_reportingmonth,
+                (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.first_response_date_week) AS first_response_date_reportingquarter,
+                (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.last_response_date_week) AS last_response_date_reportingmonth,
+                (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.last_response_date_week) AS last_response_date_reportingquarter
+            FROM jira_tickets jt
+        """
+        with self.engine.begin() as conn:
+            conn.execute(text("DROP VIEW IF EXISTS jira_tickets_reporting"))
+            conn.execute(text(view_sql))
 
         inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
