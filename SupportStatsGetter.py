@@ -568,7 +568,7 @@ class SupportStatsGetter:
         for log in worklogs:
             text = log.get("comment")
             if isinstance(text, dict):
-                text = json.dumps(text)
+                text = self._adf_to_text(text)
             records.append(
                 {
                     "id": log.get("id"),
@@ -606,6 +606,23 @@ class SupportStatsGetter:
                     }
                 )
         self.store.insert_many(self.store.jira_changelog, records)
+
+    @staticmethod
+    def _adf_to_text(node: Any) -> str:
+        """Return plain text from an Atlassian Document Format structure."""
+
+        def _inner(n: Any) -> str:
+            if isinstance(n, dict):
+                if n.get("type") == "text":
+                    return n.get("text", "")
+                return "".join(_inner(c) for c in n.get("content", []))
+            if isinstance(n, list):
+                return "".join(_inner(c) for c in n)
+            if isinstance(n, str):
+                return n
+            return ""
+
+        return _inner(node).strip()
 
     @staticmethod
     def _parse_ts(value: str | None) -> datetime.datetime | None:
