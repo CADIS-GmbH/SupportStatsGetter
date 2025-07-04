@@ -192,6 +192,9 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     )
     result["FirstResponseDate"] = extract_first_response_date(comments)
     result["LastResponseDate"] = extract_last_response_date(comments)
+    result["UpdatedWeek"] = cw_string_from_datetime(updated)
+    result["FirstResponseDateWeek"] = cw_string_from_datetime(result["FirstResponseDate"])
+    result["LastResponseDateWeek"] = cw_string_from_datetime(result["LastResponseDate"])
     return result
 
 
@@ -219,9 +222,12 @@ class SQLiteStore:
             Column("ticket_source", String),
             Column("created_week", String),
             Column("resolved_week", String),
+            Column("updated_week", String),
             Column("active_weeks", Text),
             Column("first_response_date", DateTime),
             Column("last_response_date", DateTime),
+            Column("first_response_date_week", String),
+            Column("last_response_date_week", String),
         )
         self.jira_comments = Table(
             "jira_comments",
@@ -283,6 +289,9 @@ class SQLiteStore:
         if "resolved_week" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN resolved_week VARCHAR"))
+        if "updated_week" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN updated_week VARCHAR"))
         if "active_weeks" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN active_weeks TEXT"))
@@ -292,6 +301,12 @@ class SQLiteStore:
         if "last_response_date" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN last_response_date DATETIME"))
+        if "first_response_date_week" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN first_response_date_week VARCHAR"))
+        if "last_response_date_week" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN last_response_date_week VARCHAR"))
 
         cols = [c["name"] for c in inspector.get_columns("jira_comments")]
         if "public" not in cols:
@@ -528,9 +543,12 @@ class SupportStatsGetter:
                     "ticket_source": issue.get("TicketSource"),
                     "created_week": issue.get("CreatedWeek"),
                     "resolved_week": issue.get("ResolvedWeek"),
+                    "updated_week": issue.get("UpdatedWeek"),
                     "active_weeks": issue.get("ActiveWeeks"),
                     "first_response_date": issue.get("FirstResponseDate"),
                     "last_response_date": issue.get("LastResponseDate"),
+                    "first_response_date_week": issue.get("FirstResponseDateWeek"),
+                    "last_response_date_week": issue.get("LastResponseDateWeek"),
                 }
             )
         
@@ -567,7 +585,7 @@ class SupportStatsGetter:
         for log in worklogs:
             text = log.get("comment")
             if isinstance(text, dict):
-                text = json.dumps(text)
+                text = self._adf_to_text(text)
             records.append(
                 {
                     "id": log.get("id"),
@@ -605,6 +623,23 @@ class SupportStatsGetter:
                     }
                 )
         self.store.insert_many(self.store.jira_changelog, records)
+
+    @staticmethod
+    def _adf_to_text(node: Any) -> str:
+        """Return plain text from an Atlassian Document Format structure."""
+
+        def _inner(n: Any) -> str:
+            if isinstance(n, dict):
+                if n.get("type") == "text":
+                    return n.get("text", "")
+                return "".join(_inner(c) for c in n.get("content", []))
+            if isinstance(n, list):
+                return "".join(_inner(c) for c in n)
+            if isinstance(n, str):
+                return n
+            return ""
+
+        return _inner(node).strip()
 
     @staticmethod
     def _parse_ts(value: str | None) -> datetime.datetime | None:
