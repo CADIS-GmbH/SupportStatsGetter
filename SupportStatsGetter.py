@@ -192,6 +192,9 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     )
     result["FirstResponseDate"] = extract_first_response_date(comments)
     result["LastResponseDate"] = extract_last_response_date(comments)
+    result["UpdatedWeek"] = cw_string_from_datetime(updated)
+    result["FirstResponseDateWeek"] = cw_string_from_datetime(result["FirstResponseDate"])
+    result["LastResponseDateWeek"] = cw_string_from_datetime(result["LastResponseDate"])
     return result
 
 
@@ -219,9 +222,12 @@ class SQLiteStore:
             Column("ticket_source", String),
             Column("created_week", String),
             Column("resolved_week", String),
+            Column("updated_week", String),
             Column("active_weeks", Text),
             Column("first_response_date", DateTime),
             Column("last_response_date", DateTime),
+            Column("first_response_date_week", String),
+            Column("last_response_date_week", String),
         )
         self.jira_comments = Table(
             "jira_comments",
@@ -283,6 +289,9 @@ class SQLiteStore:
         if "resolved_week" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN resolved_week VARCHAR"))
+        if "updated_week" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN updated_week VARCHAR"))
         if "active_weeks" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN active_weeks TEXT"))
@@ -292,6 +301,12 @@ class SQLiteStore:
         if "last_response_date" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN last_response_date DATETIME"))
+        if "first_response_date_week" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN first_response_date_week VARCHAR"))
+        if "last_response_date_week" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN last_response_date_week VARCHAR"))
 
         cols = [c["name"] for c in inspector.get_columns("jira_comments")]
         if "public" not in cols:
@@ -529,9 +544,12 @@ class SupportStatsGetter:
                     "ticket_source": issue.get("TicketSource"),
                     "created_week": issue.get("CreatedWeek"),
                     "resolved_week": issue.get("ResolvedWeek"),
+                    "updated_week": issue.get("UpdatedWeek"),
                     "active_weeks": issue.get("ActiveWeeks"),
                     "first_response_date": issue.get("FirstResponseDate"),
                     "last_response_date": issue.get("LastResponseDate"),
+                    "first_response_date_week": issue.get("FirstResponseDateWeek"),
+                    "last_response_date_week": issue.get("LastResponseDateWeek"),
                 }
             )
         
