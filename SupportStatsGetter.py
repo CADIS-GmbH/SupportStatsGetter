@@ -97,6 +97,49 @@ class Config:
         )
 
 
+@dataclass
+class JiraCalendarRecord:
+    """Per-day statistics for a Jira ticket."""
+
+    date: datetime.date | datetime.datetime
+    ticket_id: str
+    ticket_nr: str
+    actions: int = 0
+    public_actions: int = 0
+    start_assigned_group: str = "Unassigned"
+    end_assigned_group: str = "Unassigned"
+    start_assigned_user: str = "Unassigned"
+    end_assigned_user: str = "Unassigned"
+    did_escalate_severity: bool = False
+    did_escalate_cs: bool = False
+    did_escalate_management: bool = False
+    start_severity_txt: str = "Normal"
+    start_severity_pos: int = 0
+    end_severity_txt: str = "Normal"
+    end_severity_pos: int = 0
+    time_spent_min: int = 0
+    start_status: str = "New"
+    end_status: str = "New"
+    did_resolve: bool = False
+    total_days_open: int = 0
+    weekdays_days_since_last_contact: int = 0
+
+    cw: str = field(init=False)
+    weekday: int = field(init=False)
+    ID: str = field(init=False)
+    date_modified: datetime.datetime = field(default_factory=lambda: datetime.datetime.utcnow())
+
+    def __post_init__(self) -> None:
+        if isinstance(self.date, datetime.datetime):
+            d = self.date.date()
+        else:
+            d = self.date
+        self.date = d
+        self.ID = f"{self.ticket_id}_{d.isoformat()}"
+        self.cw = cw_string_from_datetime(datetime.datetime.combine(d, datetime.time())) or ""
+        self.weekday = d.isoweekday()
+
+
 def cw_string_from_datetime(dt: datetime.datetime | None) -> str | None:
     """Return ISO calendar week string as YYYY.WW."""
     if not dt:
@@ -208,6 +251,94 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     return result
 
 
+def make_jira_ticket_calendar(
+    issue: dict[str, Any],
+    comments: list[dict[str, Any]],
+    worklogs: list[dict[str, Any]],
+    changelog: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return per-day statistics for a Jira issue."""
+
+    created = issue.get("created")
+    if not created:
+        return []
+    end_dt = issue.get("resolved") or issue.get("updated") or datetime.datetime.utcnow()
+    start_status = issue.get("fields", {}).get("status", {}).get("name", "Open")
+    assigned_user = issue.get("fields", {}).get("assignee", {}).get("displayName")
+    assigned_group = None
+
+    events: list[tuple[datetime.datetime, str, Any]] = []
+    for c in comments:
+        ts = c.get("created")
+        if ts:
+            events.append((ts, "comment", c))
+    for w in worklogs:
+        ts = w.get("started")
+        if ts:
+            events.append((ts, "worklog", w))
+    for h in changelog:
+        ts = h.get("created")
+        if ts:
+            events.append((ts, "history", h))
+    events.sort(key=lambda x: x[0])
+
+    results: list[dict[str, Any]] = []
+    cur = created.date()
+    end_date = end_dt.date()
+    idx = 0
+    while cur <= end_date:
+        day_actions = 0
+        day_public = 0
+        day_time = 0
+        day_start_status = start_status
+        day_start_user = assigned_user
+        day_start_group = assigned_group
+
+        while idx < len(events) and events[idx][0].date() == cur:
+            ts, etype, data = events[idx]
+            if etype == "comment":
+                day_actions += 1
+                if data.get("public"):
+                    day_public += 1
+            elif etype == "worklog":
+                day_time += int((data.get("timeSpentSeconds") or 0) // 60)
+            elif etype == "history":
+                for item in data.get("items", []):
+                    field = item.get("field")
+                    to_string = item.get("toString")
+                    if field and field.lower() == "status":
+                        start_status = to_string or start_status
+                    elif field and field.lower() == "assignee":
+                        assigned_user = to_string or assigned_user
+                    elif field and "group" in field.lower():
+                        assigned_group = to_string or assigned_group
+            idx += 1
+
+        record = JiraCalendarRecord(
+            date=cur,
+            ticket_id=issue.get("id"),
+            ticket_nr=issue.get("key"),
+            actions=day_actions,
+            public_actions=day_public,
+            start_assigned_group=day_start_group or "Unassigned",
+            end_assigned_group=assigned_group or "Unassigned",
+            start_assigned_user=day_start_user or "Unassigned",
+            end_assigned_user=assigned_user or "Unassigned",
+            start_status=day_start_status,
+            end_status=start_status,
+            time_spent_min=day_time,
+            total_days_open=(cur - created.date()).days,
+        )
+        record.did_resolve = (
+            not day_start_status.startswith("Closed") and record.end_status.startswith("Closed")
+        )
+        results.append(record.__dict__)
+
+        cur += datetime.timedelta(days=1)
+
+    return results
+
+
 class SQLiteStore:
     """Simple wrapper around an SQLite database using SQLAlchemy."""
 
@@ -282,6 +413,36 @@ class SQLiteStore:
             Column("from_string", String),
             Column("to_value", String),
             Column("to_string", String),
+        )
+        self.jira_calendar = Table(
+            "jira_calendar",
+            self.meta,
+            Column("id", String, primary_key=True),
+            Column("ticket_id", String, ForeignKey("jira_tickets.id")),
+            Column("ticket_nr", String),
+            Column("date", DateTime),
+            Column("actions", Integer),
+            Column("public_actions", Integer),
+            Column("start_assigned_group", String),
+            Column("end_assigned_group", String),
+            Column("start_assigned_user", String),
+            Column("end_assigned_user", String),
+            Column("did_escalate_severity", Boolean),
+            Column("did_escalate_cs", Boolean),
+            Column("did_escalate_management", Boolean),
+            Column("start_severity_txt", String),
+            Column("start_severity_pos", Integer),
+            Column("end_severity_txt", String),
+            Column("end_severity_pos", Integer),
+            Column("time_spent_min", Integer),
+            Column("start_status", String),
+            Column("end_status", String),
+            Column("did_resolve", Boolean),
+            Column("total_days_open", Integer),
+            Column("weekdays_days_since_last_contact", Integer),
+            Column("cw", String),
+            Column("weekday", Integer),
+            Column("date_modified", DateTime),
         )
         self.internal_users = Table(
             "internal_users",
@@ -807,6 +968,7 @@ if __name__ == "__main__":
             comments_total = 0
             worklogs_total = 0
             changelog_total = 0
+            calendar_total = 0
             processed: list[dict[str, Any]] = []
             for issue in raw_issues:
                 comments = getter.fetch_jira_comments(issue["id"])
@@ -820,6 +982,10 @@ if __name__ == "__main__":
                 getter.store_jira_worklogs(issue["id"], worklogs)
                 getter.store_jira_changelog(issue["id"], changelog)
 
+                calendar_rows = make_jira_ticket_calendar(issue, comments, worklogs, changelog)
+                getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
+                calendar_total += len(calendar_rows)
+
                 comments_total += len(comments)
                 worklogs_total += len(worklogs)
                 for hist in changelog:
@@ -827,7 +993,7 @@ if __name__ == "__main__":
 
             getter.store_jira_tickets(processed)
             logging.info(
-                f"Stored {len(processed)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs and {changelog_total} changelog items in {cfg.db_path}"
+                f"Stored {len(processed)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs, {changelog_total} changelog items and {calendar_total} calendar rows in {cfg.db_path}"
             )
         except Exception:  # noqa: BLE001
             logging.exception("Failed to fetch or store Jira data")

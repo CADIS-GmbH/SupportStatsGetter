@@ -63,3 +63,16 @@ a single field change from the issue history:
 - `from_string` / `to_string` - human readable values
 
 The script currently requires the `requests`, `pytz`, `dateutil` and `sqlalchemy` packages.
+
+Daily statistics for each ticket are stored in the `jira_calendar` table. Columns roughly mirror the fields of the `StatisticsDayRecord` structure used by the legacy script:
+
+- `id` - combination of ticket id and date
+- `ticket_id` - internal issue id
+- `ticket_nr` - issue key
+- `date` - day the row represents
+- `actions` / `public_actions` - counts of comments on that day
+- `start_assigned_group` / `end_assigned_group` - assignment group at start and end of the day
+- `start_assigned_user` / `end_assigned_user` - assigned user at start and end of the day
+- `start_status` / `end_status` - status at the start and end of the day
+- `time_spent_min` - minutes logged via worklogs for the day
+- `cw` / `weekday` - calendar week and ISO weekday
