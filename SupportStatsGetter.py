@@ -18,9 +18,11 @@ import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+import fnmatch
 
-# Jira display names of internal agents used to detect response times
-INTERNAL_USERS: set[str] = set()
+# Email patterns of internal agents used to detect response times. The patterns
+# are loaded from the ``internal_users`` table at runtime.
+INTERNAL_EMAIL_PATTERNS: list[str] = []
 
 import requests
 import dateutil.parser
@@ -115,6 +117,16 @@ def active_weeks(start: datetime.datetime | None, end: datetime.datetime | None)
     return ",".join(sorted(weeks))
 
 
+def is_internal_email(email: str | None) -> bool:
+    """Return True if the email matches any internal pattern."""
+    if not email:
+        return False
+    for pattern in INTERNAL_EMAIL_PATTERNS:
+        if fnmatch.fnmatch(email.lower(), pattern.lower()):
+            return True
+    return False
+
+
 def extract_resolved_date(changelog: list[dict[str, Any]]) -> datetime.datetime | None:
     """Return the date when status changed to Closed, Resolved or Cancelled."""
     closing = {"Closed", "Resolved", "Cancelled"}
@@ -133,10 +145,11 @@ def extract_first_response_date(comments: list[dict[str, Any]]) -> datetime.date
     comments = sorted(comments, key=lambda c: c.get("created"))
     idx = 0
     for c in comments:
+        author_email = c.get("author", {}).get("emailAddress")
         if (
             idx > 0
             and c.get("public")
-            and (c.get("author") in INTERNAL_USERS)
+            and is_internal_email(author_email)
         ):
             return c.get("created")
         idx += 1
@@ -150,10 +163,11 @@ def extract_last_response_date(comments: list[dict[str, Any]]) -> datetime.datet
     comments = sorted(comments, key=lambda c: c.get("created"), reverse=True)
     idx = len(comments) - 1
     for c in comments:
+        author_email = c.get("author", {}).get("emailAddress")
         if (
             idx > 0
             and c.get("public")
-            and (c.get("author") in INTERNAL_USERS)
+            and is_internal_email(author_email)
         ):
             return c.get("created")
         idx -= 1
@@ -248,6 +262,11 @@ class SQLiteStore:
             Column("to_value", String),
             Column("to_string", String),
         )
+        self.internal_users = Table(
+            "internal_users",
+            self.meta,
+            Column("pattern", String, primary_key=True),
+        )
         self.meta.create_all(self.engine)
 
         inspector = sa_inspect(self.engine)
@@ -302,6 +321,15 @@ class SQLiteStore:
             result = conn.execute(select(func.max(self.jira_tickets.c.updated))).scalar()
         return result
 
+    @log_call
+    def load_internal_patterns(self) -> list[str]:
+        inspector = sa_inspect(self.engine)
+        if "internal_users" not in inspector.get_table_names():
+            return []
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(self.internal_users.c.pattern)).fetchall()
+        return [r[0] for r in rows]
+
 
 class SupportStatsGetter:
     """Retrieve Jira ticket data and store it in SQLite."""
@@ -310,6 +338,8 @@ class SupportStatsGetter:
     def __init__(self, config: Config):
         self.config = config
         self.store = SQLiteStore(create_engine(f"sqlite+pysqlite:///{config.db_path}"))
+        global INTERNAL_EMAIL_PATTERNS
+        INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
 
     @log_call
     def _jira_auth(self) -> tuple[str, str] | None:
