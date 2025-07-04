@@ -29,7 +29,7 @@ import dateutil.parser
 import pytz
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, DateTime, Boolean,
-    Integer, Text, ForeignKey, select, func, text, inspect as sa_inspect
+    Integer, Float, Text, ForeignKey, select, func, text, inspect as sa_inspect
 )
 from sqlalchemy.engine import Engine
 
@@ -195,6 +195,16 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     result["UpdatedWeek"] = cw_string_from_datetime(updated)
     result["FirstResponseDateWeek"] = cw_string_from_datetime(result["FirstResponseDate"])
     result["LastResponseDateWeek"] = cw_string_from_datetime(result["LastResponseDate"])
+    if result["FirstResponseDate"] and created:
+        delta = result["FirstResponseDate"] - created
+        result["FirstResponseTimeMinutes"] = int(delta.total_seconds() // 60)
+    else:
+        result["FirstResponseTimeMinutes"] = None
+    if resolved and created:
+        delta = resolved - created
+        result["ResolutionTimeDays"] = delta.total_seconds() / 86400
+    else:
+        result["ResolutionTimeDays"] = None
     return result
 
 
@@ -228,6 +238,8 @@ class SQLiteStore:
             Column("last_response_date", DateTime),
             Column("first_response_date_week", String),
             Column("last_response_date_week", String),
+            Column("first_response_time_minutes", Integer),
+            Column("resolution_time_days", Float),
         )
         self.jira_comments = Table(
             "jira_comments",
@@ -239,6 +251,7 @@ class SQLiteStore:
             Column("type", String),
             Column("body", Text),
             Column("public", Boolean, default=True),
+            Column("internal_user", Boolean),
             Column("created", DateTime),
             Column("updated", DateTime),
         )
@@ -248,7 +261,7 @@ class SQLiteStore:
             Column("id", String, primary_key=True),
             Column("ticket_id", String, ForeignKey("jira_tickets.id")),
             Column("author", String),
-            Column("time_spent_seconds", Integer),
+            Column("time_spent_minutes", Integer),
             Column("started", DateTime),
             Column("started_week", String),
             Column("text", Text),
@@ -391,6 +404,12 @@ class SQLiteStore:
         if "last_response_date_week" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN last_response_date_week VARCHAR"))
+        if "first_response_time_minutes" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN first_response_time_minutes INTEGER"))
+        if "resolution_time_days" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN resolution_time_days FLOAT"))
 
         cols = [c["name"] for c in inspector.get_columns("jira_comments")]
         if "public" not in cols:
@@ -402,6 +421,9 @@ class SQLiteStore:
         if "type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_comments ADD COLUMN type VARCHAR"))
+        if "internal_user" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_comments ADD COLUMN internal_user BOOLEAN"))
 
         cols = [c["name"] for c in inspector.get_columns("jira_worklogs")]
         if "started_week" not in cols:
@@ -410,6 +432,12 @@ class SQLiteStore:
         if "created_week" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_worklogs ADD COLUMN created_week VARCHAR"))
+        if "time_spent_minutes" not in cols and "time_spent_seconds" in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_worklogs RENAME COLUMN time_spent_seconds TO time_spent_minutes"))
+        elif "time_spent_minutes" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_worklogs ADD COLUMN time_spent_minutes INTEGER"))
 
     @log_call
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
@@ -641,6 +669,8 @@ class SupportStatsGetter:
                     "last_response_date": issue.get("LastResponseDate"),
                     "first_response_date_week": issue.get("FirstResponseDateWeek"),
                     "last_response_date_week": issue.get("LastResponseDateWeek"),
+                    "first_response_time_minutes": issue.get("FirstResponseTimeMinutes"),
+                    "resolution_time_days": issue.get("ResolutionTimeDays"),
                 }
             )
         
@@ -666,6 +696,7 @@ class SupportStatsGetter:
                     "type": comment_type,
                     "body": body,
                     "public": comment.get("public"),
+                    "internal_user": is_internal_email(comment.get("author", {}).get("emailAddress")),
                     "created": comment.get("created"),
                     "updated": comment.get("updated"),
                 }
@@ -683,7 +714,7 @@ class SupportStatsGetter:
                     "id": log.get("id"),
                     "ticket_id": issue_id,
                     "author": log.get("author", {}).get("displayName"),
-                    "time_spent_seconds": log.get("timeSpentSeconds"),
+                    "time_spent_minutes": int((log.get("timeSpentSeconds") or 0) // 60),
                     "started": log.get("started"),
                     "started_week": cw_string_from_datetime(log.get("started")),
                     "text": text,
