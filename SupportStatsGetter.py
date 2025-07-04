@@ -341,7 +341,6 @@ class SupportStatsGetter:
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
 
-    @log_call
     def _jira_auth(self) -> tuple[str, str] | None:
         if self.config.jira_user and self.config.jira_token:
             return (self.config.jira_user, self.config.jira_token)
