@@ -39,6 +39,16 @@ Each comment is stored in the `jira_comments` table with the following columns:
 - `body` - the comment text rendered as HTML
 - `created` / `updated` - timestamps
 
+Worklog entries are stored in the `jira_worklogs` table with the following columns:
+
+- `id` - the Jira worklog ID
+- `ticket_id` - internal issue ID
+- `author` - display name of the worklog author
+- `time_spent_seconds` - duration in seconds
+- `started` / `created` - timestamps
+- `text` - plain text of the worklog comment
+- `started_week` / `created_week` - ISO week strings
+
 Changelog entries are stored in the `jira_changelog` table. Each row represents
 a single field change from the issue history:
 
