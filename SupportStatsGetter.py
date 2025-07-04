@@ -250,8 +250,10 @@ class SQLiteStore:
             Column("author", String),
             Column("time_spent_seconds", Integer),
             Column("started", DateTime),
+            Column("started_week", String),
             Column("text", Text),
             Column("created", DateTime),
+            Column("created_week", String),
         )
         self.jira_changelog = Table(
             "jira_changelog",
@@ -343,6 +345,20 @@ class SQLiteStore:
             conn.execute(text("DROP VIEW IF EXISTS jira_tickets_reporting"))
             conn.execute(text(view_sql))
 
+        worklog_view_sql = """
+            CREATE VIEW IF NOT EXISTS jira_worklogs_reporting AS
+            SELECT
+                jw.*,
+                (SELECT reporting_month FROM week_reporting WHERE calendar_week = jw.started_week) AS started_reportingmonth,
+                (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jw.started_week) AS started_reportingquarter,
+                (SELECT reporting_month FROM week_reporting WHERE calendar_week = jw.created_week) AS created_reportingmonth,
+                (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jw.created_week) AS created_reportingquarter
+            FROM jira_worklogs jw
+        """
+        with self.engine.begin() as conn:
+            conn.execute(text("DROP VIEW IF EXISTS jira_worklogs_reporting"))
+            conn.execute(text(worklog_view_sql))
+
         inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
         if "updated" not in cols:
@@ -386,6 +402,14 @@ class SQLiteStore:
         if "type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_comments ADD COLUMN type VARCHAR"))
+
+        cols = [c["name"] for c in inspector.get_columns("jira_worklogs")]
+        if "started_week" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_worklogs ADD COLUMN started_week VARCHAR"))
+        if "created_week" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_worklogs ADD COLUMN created_week VARCHAR"))
 
     @log_call
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
@@ -661,8 +685,10 @@ class SupportStatsGetter:
                     "author": log.get("author", {}).get("displayName"),
                     "time_spent_seconds": log.get("timeSpentSeconds"),
                     "started": log.get("started"),
+                    "started_week": cw_string_from_datetime(log.get("started")),
                     "text": text,
                     "created": log.get("created"),
+                    "created_week": cw_string_from_datetime(log.get("created")),
                 }
             )
         self.store.insert_many(self.store.jira_worklogs, records)
