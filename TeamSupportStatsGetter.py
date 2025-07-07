@@ -1,8 +1,9 @@
 import argparse
 import base64
 import re
+import time
 import urllib
-import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import reduce
 from pathlib import Path
@@ -14,11 +15,11 @@ import dateutil.parser
 import requests
 import html2text
 
-from sqlalchemy import (create_engine, text, Table, MetaData, Column, BigInteger, String,
-                        Boolean, Date, DateTime, Double, Text, Time)
-from sqlalchemy.exc import NoSuchTableError
-
 LOAD_INCREMENT_IN_DAYS = 14
+
+RETRY_INTERVAL_SECONDS = 60
+
+STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME = ["Closed","Closed - NR","Spam/Junk Delete","Closed - Resolved","On Hold","Waiting on Customer"]
 
 STATUS_CHANGE_RE = "Changed status from (?:&apos;|')(.*)(?:&apos;|') to (?:&apos;|')(.*)(?:&apos;|')"
 STATUS_CHANGE_TO_RESOLVED_RE = "Changed status from (?:&apos;|')(?!Closed)(.*)(?:&apos;|') to (?:&apos;|')Closed(.*)(?:&apos;|')"
@@ -28,6 +29,8 @@ SEVERITY_CHANGE_RE = "Changed severity from (?:&apos;|')(.*)(?:&apos;|') to (?:&
 EMAIL_REPLY_RE = 'Changed status of ticket to (?:&quot;|")(.*)(?:&quot;|") since ticket was replied to via e-mail'
 EXCLUDE_BY_NAME_RES = ['\[RECOVERY\]']
 
+KEEP_RAW_ACTION_TEXT = False # if true the text is kept in its raw state (MAX_ACTION_TEXT_LEN is ignored)
+GET_ATTACHEMNTS = False # download and save files
 MAX_ACTION_TEXT_LEN = 1000
 
 SEVERITY_POS_MAP = {
@@ -51,181 +54,7 @@ CADIS_BDK_CONTACTS = ["8790127", "8790128", "8790895", "8791279", "8791280", "87
                       "9829169", "9853151", "9856350", "8799323", "9575844", "8799317", "9132791", "9563940", "9769965",
                       "8785940", "9831827", "9575852", "9831822", "8911198", "8785935", "9892277", "9575850", "9446502",
                       "8785936", "9575845", "8800885", "8980870", "8785945", "9831815", "8785941", "8785938", "9446497",
-                      "8785944", "9892285", "9329216"]
-
-class SQLDataStore(object):
-    def __init__(self, table_name, engine, metadata_obj = None, pk_column ="ID", fk_column=None):
-        self.table_name = table_name
-        self.engine = engine
-        self.pk_column = pk_column
-        self.fk_column = fk_column
-        self.metadata_obj = metadata_obj or MetaData()
-        self.table = self._get_table_from_db()
-        self.columns = self._get_columns_index_table(self.table)
-        self._sub_tables = {}
-        
-
-
-    def _get_table_from_db(self):
-        try:
-            table = Table(self.table_name, self.metadata_obj, autoload_with=self.engine)
-        except NoSuchTableError as e:
-            table = Table(self.table_name, self.metadata_obj)
-            table.append_column(Column(String, name="__uuid", primary_key=False, default=lambda _: str(uuid.uuid4())))
-            self.metadata_obj.create_all(bind=self.engine, tables=[table], checkfirst=True)
-        return table
-
-    @staticmethod
-    def _get_columns_index_table(table):
-        assert type(table) is Table
-        cols = {}
-        for c in table.columns:
-            cols[c.name] = c
-        return cols
-
-
-    def add_column(self, column):
-        column_name = str(column.compile(dialect=self.engine.dialect))
-        column_type = column.type.compile(self.engine.dialect)
-        self.table.append_column(column)
-        with self.engine.connect() as conn:
-            conn.execute(text(f'ALTER TABLE "{self.table_name}" ADD COLUMN {column_name} {column_type}'))
-            if self.pk_column == column.name:
-                try:
-                    conn.execute(text(f'alter table "{self.table_name}" add primary key({column.name})'))
-                except Exception:
-                    pass
-            conn.commit()
-
-    def __update_columns(self, new_data: list):
-        d_cols = SQLDataStore._infer_columns_and_types_from_data(new_data)
-        for colname, coltype in d_cols.items():
-            if coltype is Table:
-                t = SQLDataStore(table_name=f'{self.table_name}_{colname}', engine=self.engine,
-                                 metadata_obj=self.metadata_obj, fk_column=f'{self.table_name}_{self.pk_column}')
-                sub_data = []
-                for row in new_data:
-                    if type(row.get(colname)) is dict:
-                        sub_data.append(row.get(colname))
-                    elif type(row.get(colname)) is list:
-                        sub_data += row.get(colname)
-                    elif row.get(colname) is None:
-                        pass
-                    else:
-                        raise RuntimeError(f"How did ou get an elemt of type {type(row.get(colname))} into a json structure?")
-                t.autogen_db_structures(sub_data)
-                self._sub_tables[colname] = t
-
-            elif colname not in self.columns:
-                self.add_column(Column(coltype, name=colname))
-            else:
-                if not self.columns[colname] is coltype:
-                    raise RuntimeError(f'ERROR: column {colname} has changed type from {self.columns[colname]} to {coltype}. You have to adjust that manually in the DB and then rerun data import.')
-        self.columns = self._get_columns_index_table(self.table)
-
-    def autogen_db_structures(self, data):
-        self.__update_columns(data)
-
-
-
-    def add_data(self, data: list = []) -> None:
-        
-
-        pass
-
-    @staticmethod
-    def _infer_columns_and_types_from_data(data: list) -> dict:
-        """
-        infer all coumns needed given source data and which types they would have to be
-        @param data: a list of objects
-        @return a dict with colunn names and the inferred datatype
-        >>> d = [{"int": 1, "float": 2.2, 'int_str': "3", "no_int_str": '03', 'float_str': '23.5440', 'no_float_str': '0023.33', "date": "2024-01-01", "date_time": '2024-01-02T11:11:01Z', "text": "blabla", "bool": True, "bool_str": "false"}]
-        >>> SQLDataStore._infer_columns_and_types_from_data(d)
-        {'int': <class 'sqlalchemy.sql.sqltypes.BigInteger'>, 'float': <class 'sqlalchemy.sql.sqltypes.Double'>, 'int_str': <class 'sqlalchemy.sql.sqltypes.BigInteger'>, 'no_int_str': <class 'sqlalchemy.sql.sqltypes.Text'>, 'float_str': <class 'sqlalchemy.sql.sqltypes.Double'>, 'no_float_str': <class 'sqlalchemy.sql.sqltypes.Text'>, 'date': <class 'sqlalchemy.sql.sqltypes.Date'>, 'date_time': <class 'sqlalchemy.sql.sqltypes.DateTime'>, 'text': <class 'sqlalchemy.sql.sqltypes.Text'>, 'bool': <class 'sqlalchemy.sql.sqltypes.Boolean'>, 'bool_str': <class 'sqlalchemy.sql.sqltypes.Boolean'>}
-        """
-        cols_to_possible_types = {}
-        for row in data:
-            for k, v in row.items():
-                if k not in cols_to_possible_types:
-                    cols_to_possible_types[k] = {Table, BigInteger, Boolean, Date, DateTime, Double, Text}
-                cols_to_possible_types[k] = cols_to_possible_types[k].intersection(SQLDataStore._infer_possible_types(v))
-
-        TYPE_PRIORITIES = {Table: 9999, Date: 1000, DateTime: 900, Boolean: 800, BigInteger: 700, Double: 600, Text: 0}
-        coltypes = {}
-        for k, v in cols_to_possible_types.items():
-            if len(v) == 1:
-                coltypes[k] = list(v)[0]
-            elif len(v) == 0:
-                coltypes[k] = Text
-            else:
-                l = list(v)
-                l.sort(key= lambda x: TYPE_PRIORITIES[x], reverse=True)
-                coltypes[k] = l[0]
-        return coltypes
-
-    @staticmethod
-    def _infer_possible_types(value):
-        t = type(value)
-        if t is None:
-            return {BigInteger, Boolean, Date, DateTime, Double, Text, Time, Table}
-        elif t is bool:
-            return {Boolean}
-        elif t is int:
-            return {BigInteger}
-        elif t is float:
-            return {Double}
-        elif t is datetime.datetime:
-            return {DateTime}
-        elif t is datetime.date:
-            return {Date}
-        elif t is datetime.time:
-            return {Time}
-        elif t in (dict, list, object):
-            return {Table}
-        elif t is str:
-            return SQLDataStore._guess_types_from_string(value)
-        else:
-            return {Text}
-    @staticmethod
-    def _guess_types_from_string(val: str):
-        '''
-        guess what type a string may be
-        @param val: data in string form
-        @return: a set of possible types
-        '''
-        if val == '':
-            return {BigInteger, Boolean, Date, DateTime, Double, Text, Time}
-
-        if val in ["0", "1"]:
-            return {Text, BigInteger, Double, Boolean}
-
-        if val.upper() in ["TRUE", "FALSE"]:
-            return {Text, Boolean}
-
-        try:
-            if str(int(val)) == val:
-                return  {Text, BigInteger, Double}
-        except:
-            pass
-
-        try:
-            a = f'{float(val):.10f}'
-            b = val.ljust( len(a), '0')
-            if a == b:
-                return  {Text, Double}
-        except:
-            pass
-
-        try:
-            dateutil.parser.isoparse(val)
-            if len(val) == 10:
-                return {Text, Date}
-            else:
-                return {Text, DateTime}
-        except:
-            pass
-
-        return {Text}
+                      "8785944", "9892285", "9329216", "10519045"]
 
 
 
@@ -286,6 +115,7 @@ class DataStore(object):
                                                dateutil.parser.isoparse(self.data[i]["DateModified"]))
             self.oldest_record_timestamp = min(self.oldest_record_timestamp,
                                                dateutil.parser.isoparse(self.data[i]["DateModified"]))
+        pass
 
     def __deduplicate_data(self):
         """
@@ -343,6 +173,8 @@ class StatisticsDayRecord:
     did_resolve: bool = False
     total_days_open: int = 0
     weekdays_days_since_last_contact: int = 0
+    adjusted_resolution_days: int = 0
+    adjusted_resolution_weekdays: int = 0
 
     cw: str = field(init=False)
     weekday: int = field(init=False)
@@ -439,9 +271,12 @@ class StatisticsDayRecord:
         r.start_severity_txt = r.end_severity_txt = self.end_severity_txt
         r.start_assigned_group = r.end_assigned_group = self.end_assigned_group
         r.start_assigned_user = r.end_assigned_user = self.end_assigned_user
-        r.total_days_open = int(self.total_days_open) + (1 if "Closed" not in self.end_status else 0)
-        r.weekdays_days_since_last_contact = int(self.weekdays_days_since_last_contact) + (1 if (self.weekday not in [5,
-                                                                                                                      6]) else 0)  # increment the days since last contact by 1 execept for Sa and Su (i.e. if today is Fr. or Sa. then don't)
+        r.total_days_open = int(self.total_days_open) + (0 if "Closed" in self.end_status else 1)
+        r.weekdays_days_since_last_contact = int(self.weekdays_days_since_last_contact) + (0 if (self.weekday in [5, 6]) else 1)  # increment the days since last contact by 1 execept for Sa and Su (i.e. if today is Fr. or Sa. then don't)
+
+        r.adjusted_resolution_weekdays = int(self.adjusted_resolution_weekdays) + (0 if (self.end_status in STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME) or (self.weekday in [5, 6]) else 1) # increase the adjusted resolution days only if the status is open on our side and not on weekends
+        r.adjusted_resolution_days = int(self.adjusted_resolution_days) + (0 if (self.end_status in STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME) else 1)  # increase the adjusted resolution days only if the status is open on our side
+
 
         return r
 
@@ -453,15 +288,26 @@ def basic_auth(username, password):
     return f'Basic {token}'
 
 
-def get_records(act_url, header, root_element, sort_field='DateModified'):
-    r = requests.get(act_url, headers=header)
+def get_records(act_url, header, root_element = None, sort_field='DateModified'):
 
-    if r.status_code not in (200, 204):
-        print(f'ERROR: Failed to retrieve data from {act_url}, error code {r.status_code}: {r.reason} -- {r.text}')
-        return None
+    while True:
+        r = requests.get(act_url, headers=header)
+
+        if r.status_code in (200, 204):
+            break
+        elif r.status_code == 403: #usually this meens max exceeded
+            print(f'WARNING: Probably the api request maximum is exceeded. Retry in {RETRY_INTERVAL_SECONDS} from {act_url}, error code {r.status_code}: {r.reason} -- {r.text}')
+            time.sleep(RETRY_INTERVAL_SECONDS)
+        else:
+            print(f'ERROR: Failed to retrieve data from {act_url}, error code {r.status_code}: {r.reason} -- {r.text}')
+            return None
+
 
     # some interfaces have a specific element containing all the data
-    d = r.json().get(root_element, [])
+    if root_element:
+        d = r.json().get(root_element, [])
+    else:
+        d = r.json()
 
     print(f'{len(d)} {root_element} records retrieved from {act_url}')
 
@@ -469,6 +315,50 @@ def get_records(act_url, header, root_element, sort_field='DateModified'):
 
     cur_records = sorted(d, key=lambda x: x[sort_field])
     return cur_records
+
+def junk_deleted_open_tickets(records, base_url, username, password, path='/api/json/Tickets'):
+    """
+    Check if the records that are marked as not closed via the api to see if they were not deleted.
+    If a ticket was delteted in TeamSupport set its status to "Spam/Junk/delete"
+    :param records: ticket recors to be verified
+    :return: list of records with adjusted status
+    """
+    h = {
+        'accept': 'application/json',
+        'Authorization': basic_auth(username, password),
+        'Content-Type': 'application/json',
+    }
+    ret = []
+
+    for r in records:
+        if r["Status"] not in ("Closed", "Spam/Junk Delete"):
+            #try to get the ticket data
+            act_url = urllib.parse.urljoin(base_url, f'{path}/{r["ID"]}')
+
+            while True:
+                res = requests.get(act_url, headers=h)
+
+                if res.status_code in (200, 204):
+                    ret.append(r)
+                    break
+                elif res.status_code == 403:  # usually this meens max exceeded
+                    print(
+                        f'WARNING: Probably the api request maximum is exceeded. Retry in {RETRY_INTERVAL_SECONDS} from {act_url}, error code {r.status_code}: {r.reason} -- {r.text}')
+                    time.sleep(RETRY_INTERVAL_SECONDS)
+                else:
+                    print(
+                        f'ERROR: Failed to retrieve data from {act_url}, error code {res.status_code}: {res.reason} -- {res.text}')
+                    print(f'No record for ticket {r["TicketNumber"]} assuming deleted')
+                    t = deepcopy(r)
+                    t["Status"] = "Spam/Junk Delete"
+                    t["StatusPosition"] = 10
+                    t["TicketStatusID"] = "443373"
+                    ret.append(t)
+                    break
+        else:
+            ret.append(r)
+
+    return ret
 
 
 def calculate_kpi_values(tickets):
@@ -509,6 +399,14 @@ def calculate_kpi_values(tickets):
 
         t["Calendar"] = make_ticket_calendar(t)
 
+        #get the adjusted resolution time from the last record if the ticket is resolved
+        t["AdjustedResolutionDays"] = None
+        t["AdjustedResolutionWeekdays"] = None
+        if (t["Status"].find("Closed") >= 0) and len(t["Calendar"]) > 0:
+            t["AdjustedResolutionDays"] = t["Calendar"][-1].get('adjusted_resolution_days', None)
+            t["AdjustedResolutionWeekdays"] = t["Calendar"][-1].get('adjusted_resolution_weekdays', None)
+
+
         r_tickets.append(t)
 
     return r_tickets
@@ -534,7 +432,8 @@ def __reformat_record(r):
             r[k] = t.isoformat()
             add_dict_values[k + "_cw"] = cw_string_from_isodate(r[k])
         elif ("Name" in k or "Description" in k or "Text" in k) and v:
-            r[k] = ht.handle(ht.handle(v[:MAX_ACTION_TEXT_LEN]))
+            if not KEEP_RAW_ACTION_TEXT:
+                r[k] = ht.handle(ht.handle(v[:MAX_ACTION_TEXT_LEN]))
         elif "Position" in k and v:
             r[k] = int(v)
         elif "Spent" in k and v:
@@ -634,9 +533,17 @@ def make_ticket_calendar(t):
     history_by_date = group_by_date(history)
     actions_by_date = group_by_date(actions)
 
-    s_date_str = min(min(history_by_date.keys()), min(actions_by_date.keys()))
+
+    if len(history_by_date) > 0:
+        s_date_str = min(min(history_by_date.keys()), min(actions_by_date.keys()))
+    else:
+        s_date_str = min(actions_by_date.keys())
+
     if t["Status"] in ["Closed", "Spam/Junk Delete"]:
-        e_date_str = max(max(history_by_date.keys()), max(actions_by_date.keys()))
+        if len(history_by_date) > 0:
+            e_date_str = max(max(history_by_date.keys()), max(actions_by_date.keys()))
+        else:
+            e_date_str = max(actions_by_date.keys())
     else:
         e_date_str = datetime.datetime.now(tz=pytz.utc).isoformat()[:10]
 
@@ -660,7 +567,7 @@ def make_ticket_calendar(t):
 
 
 def load_tickets(base_url: str, path: str, username: str, password, filter_params=None,
-                 from_ts: datetime.datetime = dateutil.parser.isoparse('2023-01-01T00:00:00.000000Z')) -> list | None:
+                 from_ts: datetime.datetime = dateutil.parser.isoparse('2023-01-01T00:00:00.000000Z'), attachment_save_dir='./attachments') -> list | None:
     """
 
     :param base_url:
@@ -671,6 +578,9 @@ def load_tickets(base_url: str, path: str, username: str, password, filter_param
     :param from_ts:
     :return:
     """
+
+    #cludge for an apparent TS timzone bug - looks like they are inconsitent in which timezone they return
+    from_ts -= datetime.timedelta(hours=3)
 
     # get all the tickets since last modified record
     if filter_params is None:
@@ -719,6 +629,33 @@ def load_tickets(base_url: str, path: str, username: str, password, filter_param
         act_url = urllib.parse.urljoin(base_url, f'{path}/{t["ID"]}/Actions')
         t["Actions"] = get_records(act_url, h, 'Actions') or []
         print(f'Ticket #{t["TicketNumber"]} [{i}/{n}]: {len(t["Actions"])} Action entries retrieved from {act_url}')
+        if GET_ATTACHEMNTS:
+            for act in t["Actions"]:
+                # Create directory if it doesn't exist
+                directory = Path(f"{attachment_save_dir}")
+                directory.mkdir(parents=True, exist_ok=True)
+
+                print(f'Get attachemnts {act_url}')
+                act_url = urllib.parse.urljoin(base_url, f'{path}/{t["ID"]}/Actions/{act["ID"]}/Attachments')
+                print(f'Get attachemnts {act_url}')
+                atms = get_records(act_url, h, 'Attachments') or []
+                act["Attachments"] = atms
+                for atm_file in atms:
+                    act_url = urllib.parse.urljoin(base_url, f'{path}/{t["ID"]}/Actions/{act["ID"]}/Attachments/{atm_file["ID"]}')
+                    print(f'Get attachemnts {act_url}')
+
+                    try:
+                        response = requests.get(act_url, headers=h,  stream=True)  # Stream to avoid loading large files into memory
+                        response.raise_for_status()  # Raise an error for bad responses (4xx and 5xx)
+
+                        save_path = f"{attachment_save_dir}/#{t["TicketNumber"]}_atmt_{atm_file["ID"]}_{atm_file["FileName"]}"
+                        with open(save_path, 'wb') as file:
+                            for chunk in response.iter_content(chunk_size=8192):  # Read in chunks
+                                file.write(chunk)
+                            print(f"File downloaded successfully: {save_path}")
+                    except Exception as e:
+                        print(f"WARNING: failed to write attachment #{t["TicketNumber"]}_atmt_{atm_file["ID"]}_{atm_file["FileName"]}: {str(e)}")
+
 
         t["Calendar"] = make_ticket_calendar(t)
 
@@ -756,6 +693,14 @@ def parse_arguments():
                         help="only recalculate the existing data store",
                         action='store_true')
 
+    parser.add_argument("--keep_raw_action_text",
+                        help="if set keep the raw text of action. By default the text is truncated and html is removed.",
+                        action='store_true')
+    parser.add_argument("--download_attachments",
+                        help="if set attachments are downloaded and saved to the file system.",
+                        action='store_true')
+
+
     # parser.add_argument("--reverse", "-r",
     #                     help="reverse from the oldest data entry today back to initial_start_date",
     #                     action='store_true')
@@ -767,14 +712,13 @@ def parse_arguments():
 def main():
     args = parse_arguments()
 
+    global KEEP_RAW_ACTION_TEXT
+    KEEP_RAW_ACTION_TEXT= args.keep_raw_action_text
+    global GET_ATTACHEMNTS
+    GET_ATTACHEMNTS= args.download_attachments
+
     # create a data store and load data hat has been retrieved and save previously
     tickets_data_store = DataStore(args.data_dir, 'tickets')
-
-    engine = create_engine("sqlite+pysqlite:///:memory:", echo=True)
-    sds = SQLDataStore('tickets', engine)
-    sds.autogen_db_structures(tickets_data_store.data)
-    sds.add_data(tickets_data_store.data)
-    return
 
     actions_data_store = DataStore(args.data_dir, 'actions')
     history_data_store = DataStore(args.data_dir, 'history')
@@ -803,11 +747,23 @@ def main():
         records = load_tickets(base_url=args.base_url, username=args.username, password=args.password,
                                path='/api/json/Tickets',
                                from_ts=start_ts,
-                               filter_params={'GroupName[contains]': args.company})
+                               filter_params={'GroupName[contains]': args.company},
+                               attachment_save_dir = f"{args.data_dir}/attachments")
 
     if records:
         # add the data to the data store and save
         tickets_data_store.add_data(records)
+
+        #recalcualte all records data and tehn replace it
+        records = tickets_data_store.data
+        records = junk_deleted_open_tickets(records, base_url=args.base_url, username=args.username, password=args.password)
+        records = calculate_kpi_values(records)
+        actions_data_store.data = []
+        history_data_store.data = []
+        calendar_data_store.data = []
+        tickets_data_store.data = []
+        tickets_data_store.add_data(records)
+
 
         # create a separate data store for actions
         actions = reduce(lambda lst, e: lst + (e["Actions"] or []), records, [])
