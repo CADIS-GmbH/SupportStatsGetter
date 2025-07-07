@@ -15,7 +15,7 @@ import inspect
 import argparse
 import json
 import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 import fnmatch
@@ -126,7 +126,7 @@ class JiraCalendarRecord:
 
     cw: str = field(init=False)
     weekday: int = field(init=False)
-    ID: str = field(init=False)
+    id: str = field(init=False)
     date_modified: datetime.datetime = field(default_factory=lambda: datetime.datetime.utcnow())
 
     def __post_init__(self) -> None:
@@ -135,7 +135,7 @@ class JiraCalendarRecord:
         else:
             d = self.date
         self.date = d
-        self.ID = f"{self.ticket_id}_{d.isoformat()}"
+        self.id = f"{self.ticket_id}_{d.isoformat()}"
         self.cw = cw_string_from_datetime(datetime.datetime.combine(d, datetime.time())) or ""
         self.weekday = d.isoweekday()
 
