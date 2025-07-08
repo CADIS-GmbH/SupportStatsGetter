@@ -58,7 +58,8 @@ import dateutil.parser
 import pytz
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, DateTime, Boolean,
-    Integer, Float, Text, ForeignKey, select, func, text, inspect as sa_inspect
+    Integer, Float, Text, ForeignKey, select, func, text, delete,
+    inspect as sa_inspect
 )
 from sqlalchemy.engine import Engine
 
@@ -434,6 +435,9 @@ class SQLiteStore:
             Column("key", String),
             Column("summary", Text),
             Column("status", String),
+            Column("assignee", String),
+            Column("labels", Text),
+            Column("priority", String),
             Column("created", DateTime),
             Column("resolved", DateTime, nullable=True),
             Column("updated", DateTime),
@@ -621,6 +625,15 @@ class SQLiteStore:
         if "ticket_source" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN ticket_source VARCHAR"))
+        if "assignee" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN assignee VARCHAR"))
+        if "labels" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN labels TEXT"))
+        if "priority" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN priority VARCHAR"))
         if "created_week" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN created_week VARCHAR"))
@@ -706,6 +719,26 @@ class SQLiteStore:
             rows = conn.execute(select(self.internal_users.c.pattern)).fetchall()
         return [r[0] for r in rows]
 
+    @log_call
+    def get_ticket_with_related(self, ticket_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """Load a ticket and related records from the database."""
+        with self.engine.connect() as conn:
+            t = conn.execute(
+                select(self.jira_tickets).where(self.jira_tickets.c.id == ticket_id)
+            ).mappings().fetchone()
+            if not t:
+                return {}, [], [], []
+            comments = conn.execute(
+                select(self.jira_comments).where(self.jira_comments.c.ticket_id == ticket_id)
+            ).mappings().fetchall()
+            worklogs = conn.execute(
+                select(self.jira_worklogs).where(self.jira_worklogs.c.ticket_id == ticket_id)
+            ).mappings().fetchall()
+            changelog = conn.execute(
+                select(self.jira_changelog).where(self.jira_changelog.c.ticket_id == ticket_id)
+            ).mappings().fetchall()
+        return dict(t), [dict(r) for r in comments], [dict(r) for r in worklogs], [dict(r) for r in changelog]
+
 
 class SupportStatsGetter:
     """Retrieve Jira ticket data and store it in SQLite."""
@@ -725,6 +758,40 @@ class SupportStatsGetter:
     @log_call
     def latest_update_timestamp(self) -> datetime.datetime | None:
         return self.store.newest_updated_ts()
+
+    @log_call
+    def recalculate_all(self) -> None:
+        """Recalculate KPI fields and calendar for all stored tickets."""
+        with self.store.engine.connect() as conn:
+            tickets = conn.execute(select(self.store.jira_tickets.c.id)).fetchall()
+        for (ticket_id,) in tickets:
+            issue_row, comments, worklogs, changelog = self.store.get_ticket_with_related(ticket_id)
+            if not issue_row:
+                continue
+            fields = {
+                "summary": issue_row.get("summary"),
+                "status": {"name": issue_row.get("status")},
+            }
+            if issue_row.get("assignee"):
+                fields["assignee"] = {"displayName": issue_row.get("assignee")}
+            if issue_row.get("labels"):
+                fields["labels"] = [l for l in issue_row.get("labels", "").split(",") if l]
+            if issue_row.get("priority"):
+                fields["priority"] = {"name": issue_row.get("priority")}
+            issue = {
+                "id": issue_row["id"],
+                "key": issue_row.get("key"),
+                "created": issue_row.get("created"),
+                "resolved": issue_row.get("resolved"),
+                "updated": issue_row.get("updated"),
+                "fields": fields,
+            }
+            processed_issue = calculate_kpi_fields(issue, comments, changelog)
+            self.store_jira_tickets([processed_issue])
+            calendar_rows = make_jira_ticket_calendar(processed_issue, comments, worklogs, changelog)
+            with self.store.engine.begin() as conn:
+                conn.execute(delete(self.store.jira_calendar).where(self.store.jira_calendar.c.ticket_id == ticket_id))
+            self.store.insert_many(self.store.jira_calendar, calendar_rows)
 
     @log_call
     def fetch_jira_comments(self, issue_id_or_key: str) -> list[dict[str, Any]]:
@@ -898,6 +965,9 @@ class SupportStatsGetter:
                     "key": issue.get("key"),
                     "summary": fields.get("summary"),
                     "status": fields.get("status", {}).get("name"),
+                    "assignee": fields.get("assignee", {}).get("displayName"),
+                    "labels": ",".join(fields.get("labels", []) or []),
+                    "priority": fields.get("priority", {}).get("name"),
                     "created": issue.get("created"),
                     "resolved": issue.get("resolved"),
                     "updated": issue.get("updated"),
@@ -1072,6 +1142,7 @@ if __name__ == "__main__":
                     changelog_total += len(hist.get("items", []))
 
             getter.store_jira_tickets(processed)
+            getter.recalculate_all()
             logging.info(
                 f"Stored {len(processed)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs, {changelog_total} changelog items and {calendar_total} calendar rows in {cfg.db_path}"
             )
