@@ -24,6 +24,33 @@ import fnmatch
 # are loaded from the ``internal_users`` table at runtime.
 INTERNAL_EMAIL_PATTERNS: list[str] = []
 
+# Mapping of priority names to numeric positions
+PRIORITY_POS_MAP = {
+    "C": 100,
+    "B": 200,
+    "A": 300,
+    "AA": 400,
+}
+
+# Order of labels used to determine assigned group
+GROUP_PRIORITY = [
+    "1stLevel",
+    "2ndLevel",
+    "DIS-Lobster",
+    "hardware",
+    "product-team",
+    "operation",
+]
+
+# Statuses that do not count towards adjusted resolution time
+STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME = {
+    "CLOSED",
+    "CANCELLED",
+    "RESOLVED",
+    "WAITING FOR CUSTOMER",
+    "PENDING",
+}
+
 import requests
 import dateutil.parser
 import pytz
@@ -103,30 +130,33 @@ class JiraCalendarRecord:
 
     date: datetime.date | datetime.datetime
     ticket_id: str
-    ticket_nr: str
-    actions: int = 0
-    public_actions: int = 0
-    start_assigned_group: str = "Unassigned"
-    end_assigned_group: str = "Unassigned"
+    ticket_key: str
+    comments: int = 0
+    public_comments: int = 0
+    start_assigned_group: str = "1stLevel"
+    end_assigned_group: str = "1stLevel"
     start_assigned_user: str = "Unassigned"
     end_assigned_user: str = "Unassigned"
-    did_escalate_severity: bool = False
+    did_escalate_priority: bool = False
     did_escalate_cs: bool = False
     did_escalate_management: bool = False
-    start_severity_txt: str = "Normal"
-    start_severity_pos: int = 0
-    end_severity_txt: str = "Normal"
-    end_severity_pos: int = 0
+    start_priority_txt: str = ""
+    start_priority_pos: int = 0
+    end_priority_txt: str = ""
+    end_priority_pos: int = 0
     time_spent_min: int = 0
     start_status: str = "New"
     end_status: str = "New"
     did_resolve: bool = False
     total_days_open: int = 0
     weekdays_days_since_last_contact: int = 0
+    adjusted_resolution_days: int = 0
+    adjusted_resolution_weekdays: int = 0
+    is_junk: bool = False
 
     cw: str = field(init=False)
     weekday: int = field(init=False)
-    id: str = field(init=False)
+    record_id: str = field(init=False)
     date_modified: datetime.datetime = field(default_factory=lambda: datetime.datetime.utcnow())
 
     def __post_init__(self) -> None:
@@ -135,7 +165,7 @@ class JiraCalendarRecord:
         else:
             d = self.date
         self.date = d
-        self.id = f"{self.ticket_id}_{d.isoformat()}"
+        self.record_id = f"{self.ticket_key}_{d.isoformat()}"
         self.cw = cw_string_from_datetime(datetime.datetime.combine(d, datetime.time())) or ""
         self.weekday = d.isoweekday()
 
@@ -168,6 +198,14 @@ def is_internal_email(email: str | None) -> bool:
         if fnmatch.fnmatch(email.lower(), pattern.lower()):
             return True
     return False
+
+
+def group_from_labels(labels: list[str]) -> str:
+    """Return the first matching group label or ``1stLevel`` if none found."""
+    for grp in GROUP_PRIORITY:
+        if grp in labels:
+            return grp
+    return "1stLevel"
 
 
 def extract_resolved_date(changelog: list[dict[str, Any]]) -> datetime.datetime | None:
@@ -263,9 +301,19 @@ def make_jira_ticket_calendar(
     if not created:
         return []
     end_dt = issue.get("resolved") or issue.get("updated") or datetime.datetime.utcnow()
-    start_status = issue.get("fields", {}).get("status", {}).get("name", "Open")
-    assigned_user = issue.get("fields", {}).get("assignee", {}).get("displayName")
-    assigned_group = None
+
+    fields = issue.get("fields", {})
+    start_status = fields.get("status", {}).get("name", "Open")
+    assigned_user = fields.get("assignee", {}).get("displayName")
+    labels = fields.get("labels", []) or []
+    assigned_group = group_from_labels(labels)
+    priority_txt = fields.get("priority", {}).get("name") or ""
+    priority_pos = PRIORITY_POS_MAP.get(priority_txt, 0)
+
+    adjusted_days = 0
+    adjusted_weekdays = 0
+    days_open = 0
+    days_since_contact = 0
 
     events: list[tuple[datetime.datetime, str, Any]] = []
     for c in comments:
@@ -293,13 +341,17 @@ def make_jira_ticket_calendar(
         day_start_status = start_status
         day_start_user = assigned_user
         day_start_group = assigned_group
+        day_start_priority_txt = priority_txt
+        day_start_priority_pos = priority_pos
 
         while idx < len(events) and events[idx][0].date() == cur:
             ts, etype, data = events[idx]
             if etype == "comment":
                 day_actions += 1
-                if data.get("public"):
+                author_email = data.get("author", {}).get("emailAddress")
+                if data.get("public") and is_internal_email(author_email):
                     day_public += 1
+                    days_since_contact = 0
             elif etype == "worklog":
                 day_time += int((data.get("timeSpentSeconds") or 0) // 60)
             elif etype == "history":
@@ -310,29 +362,52 @@ def make_jira_ticket_calendar(
                         start_status = to_string or start_status
                     elif field and field.lower() == "assignee":
                         assigned_user = to_string or assigned_user
-                    elif field and "group" in field.lower():
-                        assigned_group = to_string or assigned_group
+                    elif field and field.lower() == "priority":
+                        priority_txt = to_string or priority_txt
+                        priority_pos = PRIORITY_POS_MAP.get(priority_txt, 0)
+                    elif field and field.lower() == "labels":
+                        labels = [l.strip() for l in (to_string or "").split(",") if l.strip()]
+                        assigned_group = group_from_labels(labels) or assigned_group
             idx += 1
 
         record = JiraCalendarRecord(
             date=cur,
             ticket_id=issue.get("id"),
-            ticket_nr=issue.get("key"),
-            actions=day_actions,
-            public_actions=day_public,
-            start_assigned_group=day_start_group or "Unassigned",
-            end_assigned_group=assigned_group or "Unassigned",
+            ticket_key=issue.get("key"),
+            comments=day_actions,
+            public_comments=day_public,
+            start_assigned_group=day_start_group or "1stLevel",
+            end_assigned_group=assigned_group or "1stLevel",
             start_assigned_user=day_start_user or "Unassigned",
             end_assigned_user=assigned_user or "Unassigned",
+            did_escalate_priority=day_start_priority_pos < priority_pos,
+            start_priority_txt=day_start_priority_txt,
+            start_priority_pos=day_start_priority_pos,
+            end_priority_txt=priority_txt,
+            end_priority_pos=priority_pos,
             start_status=day_start_status,
             end_status=start_status,
             time_spent_min=day_time,
-            total_days_open=(cur - created.date()).days,
+            total_days_open=days_open,
+            weekdays_days_since_last_contact=days_since_contact,
+            adjusted_resolution_days=adjusted_days,
+            adjusted_resolution_weekdays=adjusted_weekdays,
+            is_junk=start_status.lower() == "cancelled",
         )
         record.did_resolve = (
-            not day_start_status.startswith("Closed") and record.end_status.startswith("Closed")
+            not day_start_status.lower().startswith("closed")
+            and record.end_status.lower() in {"resolved", "closed", "cancelled"}
         )
         results.append(record.__dict__)
+
+        if start_status.upper() not in STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME:
+            adjusted_days += 1
+            if cur.isoweekday() < 6:
+                adjusted_weekdays += 1
+        if start_status.lower() not in {"resolved", "closed", "cancelled"}:
+            days_open += 1
+        if day_public == 0 and cur.isoweekday() < 6:
+            days_since_contact += 1
 
         cur += datetime.timedelta(days=1)
 
@@ -417,29 +492,32 @@ class SQLiteStore:
         self.jira_calendar = Table(
             "jira_calendar",
             self.meta,
-            Column("id", String, primary_key=True),
+            Column("record_id", String, primary_key=True),
             Column("ticket_id", String, ForeignKey("jira_tickets.id")),
-            Column("ticket_nr", String),
+            Column("ticket_key", String),
             Column("date", DateTime),
-            Column("actions", Integer),
-            Column("public_actions", Integer),
+            Column("comments", Integer),
+            Column("public_comments", Integer),
             Column("start_assigned_group", String),
             Column("end_assigned_group", String),
             Column("start_assigned_user", String),
             Column("end_assigned_user", String),
-            Column("did_escalate_severity", Boolean),
+            Column("did_escalate_priority", Boolean),
             Column("did_escalate_cs", Boolean),
             Column("did_escalate_management", Boolean),
-            Column("start_severity_txt", String),
-            Column("start_severity_pos", Integer),
-            Column("end_severity_txt", String),
-            Column("end_severity_pos", Integer),
+            Column("start_priority_txt", String),
+            Column("start_priority_pos", Integer),
+            Column("end_priority_txt", String),
+            Column("end_priority_pos", Integer),
             Column("time_spent_min", Integer),
             Column("start_status", String),
             Column("end_status", String),
             Column("did_resolve", Boolean),
             Column("total_days_open", Integer),
             Column("weekdays_days_since_last_contact", Integer),
+            Column("adjusted_resolution_days", Integer),
+            Column("adjusted_resolution_weekdays", Integer),
+            Column("is_junk", Boolean),
             Column("cw", String),
             Column("weekday", Integer),
             Column("date_modified", DateTime),
