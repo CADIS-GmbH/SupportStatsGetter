@@ -30,6 +30,8 @@ PRIORITY_POS_MAP = {
     "B": 200,
     "A": 300,
     "AA": 400,
+    "Offen": 0,
+    "Open": 0
 }
 
 # Order of labels used to determine assigned group
