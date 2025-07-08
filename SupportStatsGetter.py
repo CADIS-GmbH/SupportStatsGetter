@@ -229,12 +229,12 @@ def extract_first_response_date(comments: list[dict[str, Any]]) -> datetime.date
     comments = sorted(comments, key=lambda c: c.get("created"))
     idx = 0
     for c in comments:
-        author_email = c.get("author", {}).get("emailAddress")
-        if (
-            idx > 0
-            and c.get("public")
-            and is_internal_email(author_email)
-        ):
+        author = c.get("author")
+        author_email = author.get("emailAddress") if isinstance(author, dict) else None
+        internal = c.get("internal_user")
+        if internal is None:
+            internal = is_internal_email(author_email)
+        if idx > 0 and c.get("public") and internal:
             return c.get("created")
         idx += 1
     return None
@@ -247,12 +247,12 @@ def extract_last_response_date(comments: list[dict[str, Any]]) -> datetime.datet
     comments = sorted(comments, key=lambda c: c.get("created"), reverse=True)
     idx = len(comments) - 1
     for c in comments:
-        author_email = c.get("author", {}).get("emailAddress")
-        if (
-            idx > 0
-            and c.get("public")
-            and is_internal_email(author_email)
-        ):
+        author = c.get("author")
+        author_email = author.get("emailAddress") if isinstance(author, dict) else None
+        internal = c.get("internal_user")
+        if internal is None:
+            internal = is_internal_email(author_email)
+        if idx > 0 and c.get("public") and internal:
             return c.get("created")
         idx -= 1
     return None
@@ -351,12 +351,19 @@ def make_jira_ticket_calendar(
             ts, etype, data = events[idx]
             if etype == "comment":
                 day_actions += 1
-                author_email = data.get("author", {}).get("emailAddress")
-                if data.get("public") and is_internal_email(author_email):
+                author = data.get("author")
+                author_email = author.get("emailAddress") if isinstance(author, dict) else None
+                internal = data.get("internal_user")
+                if internal is None:
+                    internal = is_internal_email(author_email)
+                if data.get("public") and internal:
                     day_public += 1
                     days_since_contact = 0
             elif etype == "worklog":
-                day_time += int((data.get("timeSpentSeconds") or 0) // 60)
+                if "time_spent_minutes" in data:
+                    day_time += int(data.get("time_spent_minutes") or 0)
+                else:
+                    day_time += int((data.get("timeSpentSeconds") or 0) // 60)
             elif etype == "history":
                 for item in data.get("items", []):
                     field = item.get("field")
