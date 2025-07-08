@@ -723,21 +723,67 @@ class SQLiteStore:
     def get_ticket_with_related(self, ticket_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         """Load a ticket and related records from the database."""
         with self.engine.connect() as conn:
-            t = conn.execute(
-                select(self.jira_tickets).where(self.jira_tickets.c.id == ticket_id)
-            ).mappings().fetchone()
+            t = (
+                conn.execute(
+                    select(self.jira_tickets).where(self.jira_tickets.c.id == ticket_id)
+                )
+                .mappings()
+                .fetchone()
+            )
             if not t:
                 return {}, [], [], []
-            comments = conn.execute(
-                select(self.jira_comments).where(self.jira_comments.c.ticket_id == ticket_id)
-            ).mappings().fetchall()
-            worklogs = conn.execute(
-                select(self.jira_worklogs).where(self.jira_worklogs.c.ticket_id == ticket_id)
-            ).mappings().fetchall()
-            changelog = conn.execute(
-                select(self.jira_changelog).where(self.jira_changelog.c.ticket_id == ticket_id)
-            ).mappings().fetchall()
-        return dict(t), [dict(r) for r in comments], [dict(r) for r in worklogs], [dict(r) for r in changelog]
+            comments = (
+                conn.execute(
+                    select(self.jira_comments).where(self.jira_comments.c.ticket_id == ticket_id)
+                )
+                .mappings()
+                .fetchall()
+            )
+            worklogs = (
+                conn.execute(
+                    select(self.jira_worklogs).where(self.jira_worklogs.c.ticket_id == ticket_id)
+                )
+                .mappings()
+                .fetchall()
+            )
+            changelog_rows = (
+                conn.execute(
+                    select(self.jira_changelog).where(self.jira_changelog.c.ticket_id == ticket_id)
+                )
+                .mappings()
+                .fetchall()
+            )
+
+        changelog: list[dict[str, Any]] = []
+        histories: dict[str, dict[str, Any]] = {}
+        for row in changelog_rows:
+            r = dict(row)
+            hid = r.get("history_id")
+            if hid not in histories:
+                histories[hid] = {
+                    "id": hid,
+                    "author": r.get("author"),
+                    "created": r.get("created"),
+                    "items": [],
+                }
+            histories[hid]["items"].append(
+                {
+                    "field": r.get("field"),
+                    "fieldtype": r.get("fieldtype"),
+                    "from": r.get("from_value"),
+                    "fromString": r.get("from_string"),
+                    "to": r.get("to_value"),
+                    "toString": r.get("to_string"),
+                }
+            )
+        changelog = list(histories.values())
+
+        return (
+            dict(t),
+            [dict(r) for r in comments],
+            [dict(r) for r in worklogs],
+            changelog,
+        )
 
 
 class SupportStatsGetter:
