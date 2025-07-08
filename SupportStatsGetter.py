@@ -305,12 +305,12 @@ def make_jira_ticket_calendar(
         return []
     end_dt = issue.get("resolved") or issue.get("updated") or datetime.datetime.utcnow()
 
-    fields = issue.get("fields", {})
-    start_status = fields.get("status", {}).get("name", "Open")
-    assigned_user = fields.get("assignee", {}).get("displayName")
-    labels = fields.get("labels", []) or []
+    fields = issue.get("fields") or {}
+    start_status = (fields.get("status") or {}).get("name", "Open")
+    assigned_user = (fields.get("assignee") or {}).get("displayName")
+    labels = fields.get("labels") or []
     assigned_group = group_from_labels(labels)
-    priority_txt = fields.get("priority", {}).get("name") or ""
+    priority_txt = (fields.get("priority") or {}).get("name") or ""
     priority_pos = PRIORITY_POS_MAP.get(priority_txt, 0)
 
     adjusted_days = 0
@@ -1029,10 +1029,10 @@ class SupportStatsGetter:
                     "id": issue["id"],
                     "key": issue.get("key"),
                     "summary": fields.get("summary"),
-                    "status": fields.get("status", {}).get("name"),
-                    "assignee": fields.get("assignee", {}).get("displayName"),
-                    "labels": ",".join(fields.get("labels", []) or []),
-                    "priority": fields.get("priority", {}).get("name"),
+                    "status": (fields.get("status") or {}).get("name"),
+                    "assignee": (fields.get("assignee") or {}).get("displayName"),
+                    "labels": ",".join(fields.get("labels") or []),
+                    "priority": (fields.get("priority") or {}).get("name"),
                     "created": issue.get("created"),
                     "resolved": issue.get("resolved"),
                     "updated": issue.get("updated"),
