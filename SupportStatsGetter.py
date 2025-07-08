@@ -624,6 +624,18 @@ class SQLiteStore:
             conn.execute(text("DROP VIEW IF EXISTS jira_worklogs_reporting"))
             conn.execute(text(worklog_view_sql))
 
+        calendar_view_sql = """
+            CREATE VIEW IF NOT EXISTS jira_calendar_reporting AS
+            SELECT
+                jc.*,
+                (SELECT reporting_month FROM week_reporting WHERE calendar_week = jc.cw) AS cw_reportingmonth,
+                (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jc.cw) AS cw_reportingquarter
+            FROM jira_calendar jc
+        """
+        with self.engine.begin() as conn:
+            conn.execute(text("DROP VIEW IF EXISTS jira_calendar_reporting"))
+            conn.execute(text(calendar_view_sql))
+
         inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
         if "updated" not in cols:
