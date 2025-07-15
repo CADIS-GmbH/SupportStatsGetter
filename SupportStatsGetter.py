@@ -505,6 +505,7 @@ class SQLiteStore:
             Column("history_id", String),
             Column("ticket_id", String, ForeignKey("jira_tickets.id")),
             Column("author", String),
+            Column("author_email", String),
             Column("created", DateTime),
             Column("field", String),
             Column("fieldtype", String),
@@ -748,6 +749,11 @@ class SQLiteStore:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_worklogs ADD COLUMN author_email VARCHAR"))
 
+        cols = [c["name"] for c in inspector.get_columns("jira_changelog")]
+        if "author_email" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_changelog ADD COLUMN author_email VARCHAR"))
+
     @log_call
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
         if not rows:
@@ -818,6 +824,7 @@ class SQLiteStore:
                 histories[hid] = {
                     "id": hid,
                     "author": r.get("author"),
+                    "author_email": r.get("author_email"),
                     "created": r.get("created"),
                     "items": [],
                 }
@@ -1146,6 +1153,7 @@ class SupportStatsGetter:
         for hist in changelog:
             history_id = hist.get("id")
             author = hist.get("author", {}).get("displayName")
+            author_email = hist.get("author", {}).get("emailAddress")
             created = hist.get("created")
             items = hist.get("items", [])
             for idx, item in enumerate(items):
@@ -1155,6 +1163,7 @@ class SupportStatsGetter:
                         "history_id": history_id,
                         "ticket_id": issue_id,
                         "author": author,
+                        "author_email": author_email,
                         "created": created,
                         "field": item.get("field"),
                         "fieldtype": item.get("fieldtype"),

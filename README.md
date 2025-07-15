@@ -58,6 +58,7 @@ a single field change from the issue history:
 - `history_id` - identifier of the history entry returned by Jira
 - `ticket_id` - internal issue ID
 - `author` - display name of the user who made the change
+- `author_email` - email of the user who made the change
 - `created` - timestamp of the change
 - `field` - the field that changed
 - `fieldtype` - Jira field type
