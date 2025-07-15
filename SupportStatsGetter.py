@@ -72,7 +72,7 @@ def log_call(func):
         bound = inspect.signature(func).bind_partial(*args, **kwargs)
         bound.apply_defaults()
         params = ", ".join(
-            f"{k}={v!r}" for k, v in bound.arguments.items() if k != "self"
+            f"{k}={ascii(v)}" for k, v in bound.arguments.items() if k != "self"
         )
         logging.getLogger(func.__module__).debug(f"{func.__name__}({params})")
         return func(*args, **kwargs)
