@@ -17,12 +17,12 @@ import json
 import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
-import fnmatch
+from typing import Any, Iterable, Pattern
+import re
 
 # Email patterns of internal agents used to detect response times. The patterns
 # are loaded from the ``internal_users`` table at runtime.
-INTERNAL_EMAIL_PATTERNS: list[str] = []
+INTERNAL_EMAIL_PATTERNS: list[Pattern[str]] = []
 
 # Mapping of priority names to numeric positions
 PRIORITY_POS_MAP = {
@@ -200,7 +200,7 @@ def is_internal_email(email: str | None) -> bool:
     if not email:
         return False
     for pattern in INTERNAL_EMAIL_PATTERNS:
-        if fnmatch.fnmatch(email.lower(), pattern.lower()):
+        if pattern.search(email):
             return True
     return False
 
@@ -766,13 +766,13 @@ class SQLiteStore:
         return result
 
     @log_call
-    def load_internal_patterns(self) -> list[str]:
+    def load_internal_patterns(self) -> list[Pattern[str]]:
         inspector = sa_inspect(self.engine)
         if "internal_users" not in inspector.get_table_names():
             return []
         with self.engine.connect() as conn:
             rows = conn.execute(select(self.internal_users.c.pattern)).fetchall()
-        return [r[0] for r in rows]
+        return [re.compile(r[0], re.IGNORECASE) for r in rows]
 
     @log_call
     def get_ticket_with_related(self, ticket_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
