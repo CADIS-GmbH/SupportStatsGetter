@@ -140,6 +140,8 @@ class JiraCalendarRecord:
     end_assigned_group: str = "1stLevel"
     start_assigned_user: str = "Unassigned"
     end_assigned_user: str = "Unassigned"
+    start_assigned_user_email: str | None = None
+    end_assigned_user_email: str | None = None
     did_escalate_priority: bool = False
     did_escalate_cs: bool = False
     did_escalate_management: bool = False
@@ -308,6 +310,7 @@ def make_jira_ticket_calendar(
     fields = issue.get("fields") or {}
     start_status = (fields.get("status") or {}).get("name", "Open")
     assigned_user = (fields.get("assignee") or {}).get("displayName")
+    assigned_user_email = (fields.get("assignee") or {}).get("emailAddress")
     labels = fields.get("labels") or []
     assigned_group = group_from_labels(labels)
     priority_txt = (fields.get("priority") or {}).get("name") or ""
@@ -343,6 +346,7 @@ def make_jira_ticket_calendar(
         day_time = 0
         day_start_status = start_status
         day_start_user = assigned_user
+        day_start_user_email = assigned_user_email
         day_start_group = assigned_group
         day_start_priority_txt = priority_txt
         day_start_priority_pos = priority_pos
@@ -390,6 +394,8 @@ def make_jira_ticket_calendar(
             end_assigned_group=assigned_group or "1stLevel",
             start_assigned_user=day_start_user or "Unassigned",
             end_assigned_user=assigned_user or "Unassigned",
+            start_assigned_user_email=day_start_user_email,
+            end_assigned_user_email=assigned_user_email,
             did_escalate_priority=day_start_priority_pos < priority_pos,
             start_priority_txt=day_start_priority_txt,
             start_priority_pos=day_start_priority_pos,
@@ -443,6 +449,9 @@ class SQLiteStore:
             Column("summary", Text),
             Column("status", String),
             Column("assignee", String),
+            Column("assignee_email", String),
+            Column("creator", String),
+            Column("creator_email", String),
             Column("labels", Text),
             Column("priority", String),
             Column("created", DateTime),
@@ -467,6 +476,7 @@ class SQLiteStore:
             Column("ticket_id", String, ForeignKey("jira_tickets.id")),
             Column("issue_key", String),
             Column("author", String),
+            Column("author_email", String),
             Column("type", String),
             Column("body", Text),
             Column("public", Boolean, default=True),
@@ -480,6 +490,7 @@ class SQLiteStore:
             Column("id", String, primary_key=True),
             Column("ticket_id", String, ForeignKey("jira_tickets.id")),
             Column("author", String),
+            Column("author_email", String),
             Column("time_spent_minutes", Integer),
             Column("started", DateTime),
             Column("started_week", String),
@@ -515,6 +526,8 @@ class SQLiteStore:
             Column("end_assigned_group", String),
             Column("start_assigned_user", String),
             Column("end_assigned_user", String),
+            Column("start_assigned_user_email", String),
+            Column("end_assigned_user_email", String),
             Column("did_escalate_priority", Boolean),
             Column("did_escalate_cs", Boolean),
             Column("did_escalate_management", Boolean),
@@ -647,6 +660,15 @@ class SQLiteStore:
         if "assignee" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN assignee VARCHAR"))
+        if "assignee_email" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN assignee_email VARCHAR"))
+        if "creator" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN creator VARCHAR"))
+        if "creator_email" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN creator_email VARCHAR"))
         if "labels" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN labels TEXT"))
@@ -684,6 +706,14 @@ class SQLiteStore:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN resolution_time_days FLOAT"))
 
+        cols = [c["name"] for c in inspector.get_columns("jira_calendar")]
+        if "start_assigned_user_email" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN start_assigned_user_email VARCHAR"))
+        if "end_assigned_user_email" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_assigned_user_email VARCHAR"))
+
         cols = [c["name"] for c in inspector.get_columns("jira_comments")]
         if "public" not in cols:
             with self.engine.begin() as conn:
@@ -697,6 +727,9 @@ class SQLiteStore:
         if "internal_user" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_comments ADD COLUMN internal_user BOOLEAN"))
+        if "author_email" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_comments ADD COLUMN author_email VARCHAR"))
 
         cols = [c["name"] for c in inspector.get_columns("jira_worklogs")]
         if "started_week" not in cols:
@@ -711,6 +744,9 @@ class SQLiteStore:
         elif "time_spent_minutes" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_worklogs ADD COLUMN time_spent_minutes INTEGER"))
+        if "author_email" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_worklogs ADD COLUMN author_email VARCHAR"))
 
     @log_call
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
@@ -1031,6 +1067,9 @@ class SupportStatsGetter:
                     "summary": fields.get("summary"),
                     "status": (fields.get("status") or {}).get("name"),
                     "assignee": (fields.get("assignee") or {}).get("displayName"),
+                    "assignee_email": (fields.get("assignee") or {}).get("emailAddress"),
+                    "creator": (fields.get("creator") or {}).get("displayName"),
+                    "creator_email": (fields.get("creator") or {}).get("emailAddress"),
                     "labels": ",".join(fields.get("labels") or []),
                     "priority": (fields.get("priority") or {}).get("name"),
                     "created": issue.get("created"),
@@ -1069,6 +1108,7 @@ class SupportStatsGetter:
                     "ticket_id": issue_id,
                     "issue_key": issue_key,
                     "author": comment.get("author", {}).get("displayName"),
+                    "author_email": comment.get("author", {}).get("emailAddress"),
                     "type": comment_type,
                     "body": body,
                     "public": comment.get("public"),
@@ -1090,6 +1130,7 @@ class SupportStatsGetter:
                     "id": log.get("id"),
                     "ticket_id": issue_id,
                     "author": log.get("author", {}).get("displayName"),
+                    "author_email": log.get("author", {}).get("emailAddress"),
                     "time_spent_minutes": int((log.get("timeSpentSeconds") or 0) // 60),
                     "started": log.get("started"),
                     "started_week": cw_string_from_datetime(log.get("started")),

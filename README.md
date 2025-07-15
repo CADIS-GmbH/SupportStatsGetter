@@ -35,6 +35,7 @@ Each comment is stored in the `jira_comments` table with the following columns:
 - `ticket_id` - internal issue ID
 - `issue_key` - the human readable issue key
 - `author` - display name of the comment author
+- `author_email` - email of the comment author
 - `type` - value of the body type returned by Jira
 - `body` - the comment text rendered as HTML
 - `created` / `updated` - timestamps
@@ -44,6 +45,7 @@ Worklog entries are stored in the `jira_worklogs` table with the following colum
 - `id` - the Jira worklog ID
 - `ticket_id` - internal issue ID
 - `author` - display name of the worklog author
+- `author_email` - email of the worklog author
 - `time_spent_seconds` - duration in seconds
 - `started` / `created` - timestamps
 - `text` - plain text of the worklog comment
@@ -73,6 +75,7 @@ Daily statistics for each ticket are stored in the `jira_calendar` table. Column
 - `actions` / `public_actions` - counts of comments on that day
 - `start_assigned_group` / `end_assigned_group` - assignment group at start and end of the day
 - `start_assigned_user` / `end_assigned_user` - assigned user at start and end of the day
+- `start_assigned_user_email` / `end_assigned_user_email` - email addresses of the assigned users
 - `start_status` / `end_status` - status at the start and end of the day
 - `time_spent_min` - minutes logged via worklogs for the day
 - `cw` / `weekday` - calendar week and ISO weekday
