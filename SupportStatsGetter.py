@@ -17,7 +17,7 @@ import json
 import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Pattern
+from typing import Any, Iterable, Pattern, Mapping
 import re
 
 # Email patterns of internal agents used to detect response times. The patterns
@@ -195,13 +195,32 @@ def active_weeks(start: datetime.datetime | None, end: datetime.datetime | None)
     return ",".join(sorted(weeks))
 
 
-def is_internal_email(email: str | None) -> bool:
-    """Return True if the email matches any internal pattern."""
-    if not email:
+def is_internal_user(author: Mapping[str, Any] | None) -> bool:
+    """Return True if the author appears to be an internal user.
+
+    The email address is checked first. If present and matching one of the
+    configured internal patterns, the author is considered internal. If the
+    email address is present but does not match any pattern, the author is
+    treated as external. If no email address is available, the Jira
+    ``accountType`` property is inspected. A value of ``customer`` means the
+    author is external, any other value is assumed to be internal.
+    """
+
+    if not author:
         return False
-    for pattern in INTERNAL_EMAIL_PATTERNS:
-        if pattern.search(email):
-            return True
+
+    email = author.get("emailAddress")
+    if email:
+        for pattern in INTERNAL_EMAIL_PATTERNS:
+            if pattern.search(email):
+                return True
+        return False
+
+    account_type = author.get("accountType")
+    if account_type == "customer":
+        return False
+    if account_type:
+        return True
     return False
 
 
@@ -232,10 +251,9 @@ def extract_first_response_date(comments: list[dict[str, Any]]) -> datetime.date
     idx = 0
     for c in comments:
         author = c.get("author")
-        author_email = author.get("emailAddress") if isinstance(author, dict) else None
         internal = c.get("internal_user")
         if internal is None:
-            internal = is_internal_email(author_email)
+            internal = is_internal_user(author if isinstance(author, dict) else None)
         if idx > 0 and c.get("public") and internal:
             return c.get("created")
         idx += 1
@@ -250,10 +268,9 @@ def extract_last_response_date(comments: list[dict[str, Any]]) -> datetime.datet
     idx = len(comments) - 1
     for c in comments:
         author = c.get("author")
-        author_email = author.get("emailAddress") if isinstance(author, dict) else None
         internal = c.get("internal_user")
         if internal is None:
-            internal = is_internal_email(author_email)
+            internal = is_internal_user(author if isinstance(author, dict) else None)
         if idx > 0 and c.get("public") and internal:
             return c.get("created")
         idx -= 1
@@ -356,10 +373,9 @@ def make_jira_ticket_calendar(
             if etype == "comment":
                 day_actions += 1
                 author = data.get("author")
-                author_email = author.get("emailAddress") if isinstance(author, dict) else None
                 internal = data.get("internal_user")
                 if internal is None:
-                    internal = is_internal_email(author_email)
+                    internal = is_internal_user(author if isinstance(author, dict) else None)
                 if data.get("public") and internal:
                     day_public += 1
                     days_since_contact = 0
@@ -1119,7 +1135,7 @@ class SupportStatsGetter:
                     "type": comment_type,
                     "body": body,
                     "public": comment.get("public"),
-                    "internal_user": is_internal_email(comment.get("author", {}).get("emailAddress")),
+                    "internal_user": is_internal_user(comment.get("author")),
                     "created": comment.get("created"),
                     "updated": comment.get("updated"),
                 }
