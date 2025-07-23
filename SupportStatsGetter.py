@@ -113,6 +113,7 @@ class Config:
     base_jql: str | None = None
     log_level: str = "INFO"
     log_file: Path = Path("support_stats.log")
+    custom_fields: dict[str, str] = field(default_factory=dict)
 
     @staticmethod
     @log_call
@@ -127,6 +128,7 @@ class Config:
             base_jql=data.get("base_jql"),
             log_level=data.get("log_level", "INFO"),
             log_file=Path(data.get("log_file", "support_stats.log")),
+            custom_fields=data.get("custom_fields", {}),
         )
 
 
@@ -320,6 +322,7 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
         fields.get("request-channel-source")
         or fields.get("request-channel-type")
     )
+    result["RequestChannelType"] = fields.get("request-channel-type")
     result["FirstResponseDate"] = extract_first_response_date(comments)
     result["LastResponseDate"] = extract_last_response_date(comments)
     result["UpdatedWeek"] = cw_string_from_datetime(updated)
@@ -497,10 +500,12 @@ class SQLiteStore:
             Column("creator_email", String),
             Column("labels", Text),
             Column("priority", String),
+            Column("priority_pos", Integer),
             Column("created", DateTime),
             Column("resolved", DateTime, nullable=True),
             Column("updated", DateTime),
             Column("ticket_source", String),
+            Column("request_channel_type", String),
             Column("created_week", String),
             Column("resolved_week", String),
             Column("updated_week", String),
@@ -727,6 +732,17 @@ class SQLiteStore:
             conn.execute(text("DROP VIEW IF EXISTS jira_tickets_active_weeks"))
             conn.execute(text(activeweeks_view_sql))
 
+        ticket_worklogs_view_sql = """
+            CREATE VIEW IF NOT EXISTS jira_tickets_worklogs AS
+            SELECT
+                jt.*, jw.*
+            FROM jira_tickets jt
+            LEFT JOIN jira_worklogs jw ON jt.id = jw.ticket_id
+        """
+        with self.engine.begin() as conn:
+            conn.execute(text("DROP VIEW IF EXISTS jira_tickets_worklogs"))
+            conn.execute(text(ticket_worklogs_view_sql))
+
         inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
         if "updated" not in cols:
@@ -735,6 +751,9 @@ class SQLiteStore:
         if "ticket_source" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN ticket_source VARCHAR"))
+        if "request_channel_type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN request_channel_type VARCHAR"))
         if "assignee" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN assignee VARCHAR"))
@@ -753,6 +772,9 @@ class SQLiteStore:
         if "priority" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN priority VARCHAR"))
+        if "priority_pos" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN priority_pos INTEGER"))
         if "created_week" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN created_week VARCHAR"))
@@ -988,6 +1010,22 @@ class SupportStatsGetter:
         global ORG_PATTERNS
         ORG_PATTERNS = self.store.load_org_patterns()
 
+    def _field_value(
+        self,
+        fields: Mapping[str, Any],
+        logical: str,
+        fallbacks: Iterable[str] | None = None,
+    ) -> Any:
+        """Return the value for a logical field name respecting custom mapping."""
+        name = self.config.custom_fields.get(logical)
+        if name and name in fields:
+            return fields.get(name)
+        fallbacks = fallbacks or []
+        for key in fallbacks:
+            if key in fields:
+                return fields.get(key)
+        return None
+
     def _jira_auth(self) -> tuple[str, str] | None:
         if self.config.jira_user and self.config.jira_token:
             return (self.config.jira_user, self.config.jira_token)
@@ -1217,6 +1255,8 @@ class SupportStatsGetter:
         records = []
         for issue in issues:
             fields = issue.get("fields", {})
+            prio_txt = (fields.get("priority") or {}).get("name")
+            prio_pos = PRIORITY_POS_MAP.get(prio_txt, 0)
             records.append(
                 {
                     "id": issue["id"],
@@ -1228,28 +1268,55 @@ class SupportStatsGetter:
                     "creator": (fields.get("creator") or {}).get("displayName"),
                     "creator_email": (fields.get("creator") or {}).get("emailAddress"),
                     "labels": ",".join(fields.get("labels") or []),
-                    "priority": (fields.get("priority") or {}).get("name"),
-                    "request_type": self._simple_value(fields.get("requestType")),
-                    "deployment_type": self._simple_value(fields.get("Deployment type")),
-                    "organizations": ",".join([
-                        o.get("name") if isinstance(o, dict) else str(o)
-                        for o in (fields.get("Organizations") or [])
-                    ]),
+                    "priority": prio_txt,
+                    "priority_pos": prio_pos,
+                    "request_type": self._simple_value(
+                        self._field_value(fields, "request_type", ["requestType"])
+                    ),
+                    "deployment_type": self._simple_value(
+                        self._field_value(fields, "deployment_type", ["Deployment type"])
+                    ),
+                    "organizations": ",".join(
+                        [
+                            o.get("name") if isinstance(o, dict) else str(o)
+                            for o in (
+                                self._field_value(fields, "organizations", ["Organizations"]) or []
+                            )
+                        ]
+                    ),
                     "primary_organization": primary_org_from_names([
                         o.get("name") if isinstance(o, dict) else str(o)
-                        for o in (fields.get("Organizations") or [])
+                        for o in (
+                            self._field_value(fields, "organizations", ["Organizations"]) or []
+                        )
                     ]) or None,
-                    "resolution": self._simple_value((fields.get("resolution"))),
-                    "satisfaction": self._simple_value(fields.get("satisfaction")),
-                    "work_category": self._simple_value(fields.get("work category")),
-                    "sentiment": self._simple_value(fields.get("sentiment")),
-                    "time_to_close": self._simple_value(fields.get("time to close")),
-                    "time_to_qualified_answer": self._simple_value(fields.get("time to qualified answer")),
-                    "time_to_resolution": self._simple_value(fields.get("time to resolution")),
+                    "resolution": self._simple_value(
+                        self._field_value(fields, "resolution", ["resolution"])
+                    ),
+                    "satisfaction": self._simple_value(
+                        self._field_value(fields, "satisfaction", ["satisfaction"])
+                    ),
+                    "work_category": self._simple_value(
+                        self._field_value(fields, "work_category", ["work category"])
+                    ),
+                    "sentiment": self._simple_value(
+                        self._field_value(fields, "sentiment", ["sentiment"])
+                    ),
+                    "time_to_close": self._simple_value(
+                        self._field_value(fields, "time_to_close", ["time to close"])
+                    ),
+                    "time_to_qualified_answer": self._simple_value(
+                        self._field_value(fields, "time_to_qualified_answer", ["time to qualified answer"])
+                    ),
+                    "time_to_resolution": self._simple_value(
+                        self._field_value(fields, "time_to_resolution", ["time to resolution"])
+                    ),
+
                     "created": issue.get("created"),
                     "resolved": issue.get("resolved"),
                     "updated": issue.get("updated"),
                     "ticket_source": issue.get("TicketSource"),
+                    "request_channel_type": issue.get("RequestChannelType"),
                     "created_week": issue.get("CreatedWeek"),
                     "resolved_week": issue.get("ResolvedWeek"),
                     "updated_week": issue.get("UpdatedWeek"),
