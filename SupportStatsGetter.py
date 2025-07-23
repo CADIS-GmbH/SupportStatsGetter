@@ -497,6 +497,7 @@ class SQLiteStore:
             Column("creator_email", String),
             Column("labels", Text),
             Column("priority", String),
+            Column("priority_pos", Integer),
             Column("created", DateTime),
             Column("resolved", DateTime, nullable=True),
             Column("updated", DateTime),
@@ -711,6 +712,17 @@ class SQLiteStore:
             conn.execute(text("DROP VIEW IF EXISTS jira_calendar_reporting"))
             conn.execute(text(calendar_view_sql))
 
+        ticket_worklogs_view_sql = """
+            CREATE VIEW IF NOT EXISTS jira_tickets_worklogs AS
+            SELECT
+                jt.*, jw.*
+            FROM jira_tickets jt
+            LEFT JOIN jira_worklogs jw ON jt.id = jw.ticket_id
+        """
+        with self.engine.begin() as conn:
+            conn.execute(text("DROP VIEW IF EXISTS jira_tickets_worklogs"))
+            conn.execute(text(ticket_worklogs_view_sql))
+
         inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
         if "updated" not in cols:
@@ -737,6 +749,9 @@ class SQLiteStore:
         if "priority" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN priority VARCHAR"))
+        if "priority_pos" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN priority_pos INTEGER"))
         if "created_week" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN created_week VARCHAR"))
@@ -1201,6 +1216,8 @@ class SupportStatsGetter:
         records = []
         for issue in issues:
             fields = issue.get("fields", {})
+            prio_txt = (fields.get("priority") or {}).get("name")
+            prio_pos = PRIORITY_POS_MAP.get(prio_txt, 0)
             records.append(
                 {
                     "id": issue["id"],
@@ -1212,7 +1229,8 @@ class SupportStatsGetter:
                     "creator": (fields.get("creator") or {}).get("displayName"),
                     "creator_email": (fields.get("creator") or {}).get("emailAddress"),
                     "labels": ",".join(fields.get("labels") or []),
-                    "priority": (fields.get("priority") or {}).get("name"),
+                    "priority": prio_txt,
+                    "priority_pos": prio_pos,
                     "request_type": self._simple_value(fields.get("requestType")),
                     "deployment_type": self._simple_value(fields.get("Deployment type")),
                     "organizations": ",".join([
