@@ -113,6 +113,7 @@ class Config:
     base_jql: str | None = None
     log_level: str = "INFO"
     log_file: Path = Path("support_stats.log")
+    custom_fields: dict[str, str] = field(default_factory=dict)
 
     @staticmethod
     @log_call
@@ -127,6 +128,7 @@ class Config:
             base_jql=data.get("base_jql"),
             log_level=data.get("log_level", "INFO"),
             log_file=Path(data.get("log_file", "support_stats.log")),
+            custom_fields=data.get("custom_fields", {}),
         )
 
 
@@ -977,6 +979,22 @@ class SupportStatsGetter:
         global ORG_PATTERNS
         ORG_PATTERNS = self.store.load_org_patterns()
 
+    def _field_value(
+        self,
+        fields: Mapping[str, Any],
+        logical: str,
+        fallbacks: Iterable[str] | None = None,
+    ) -> Any:
+        """Return the value for a logical field name respecting custom mapping."""
+        name = self.config.custom_fields.get(logical)
+        if name and name in fields:
+            return fields.get(name)
+        fallbacks = fallbacks or []
+        for key in fallbacks:
+            if key in fields:
+                return fields.get(key)
+        return None
+
     def _jira_auth(self) -> tuple[str, str] | None:
         if self.config.jira_user and self.config.jira_token:
             return (self.config.jira_user, self.config.jira_token)
@@ -1218,23 +1236,48 @@ class SupportStatsGetter:
                     "creator_email": (fields.get("creator") or {}).get("emailAddress"),
                     "labels": ",".join(fields.get("labels") or []),
                     "priority": (fields.get("priority") or {}).get("name"),
-                    "request_type": self._simple_value(fields.get("requestType")),
-                    "deployment_type": self._simple_value(fields.get("Deployment type")),
-                    "organizations": ",".join([
-                        o.get("name") if isinstance(o, dict) else str(o)
-                        for o in (fields.get("Organizations") or [])
-                    ]),
+                    "request_type": self._simple_value(
+                        self._field_value(fields, "request_type", ["requestType"])
+                    ),
+                    "deployment_type": self._simple_value(
+                        self._field_value(fields, "deployment_type", ["Deployment type"])
+                    ),
+                    "organizations": ",".join(
+                        [
+                            o.get("name") if isinstance(o, dict) else str(o)
+                            for o in (
+                                self._field_value(fields, "organizations", ["Organizations"]) or []
+                            )
+                        ]
+                    ),
                     "primary_organization": primary_org_from_names([
                         o.get("name") if isinstance(o, dict) else str(o)
-                        for o in (fields.get("Organizations") or [])
+                        for o in (
+                            self._field_value(fields, "organizations", ["Organizations"]) or []
+                        )
                     ]) or None,
-                    "resolution": self._simple_value((fields.get("resolution"))),
-                    "satisfaction": self._simple_value(fields.get("satisfaction")),
-                    "work_category": self._simple_value(fields.get("work category")),
-                    "sentiment": self._simple_value(fields.get("sentiment")),
-                    "time_to_close": self._simple_value(fields.get("time to close")),
-                    "time_to_qualified_answer": self._simple_value(fields.get("time to qualified answer")),
-                    "time_to_resolution": self._simple_value(fields.get("time to resolution")),
+                    "resolution": self._simple_value(
+                        self._field_value(fields, "resolution", ["resolution"])
+                    ),
+                    "satisfaction": self._simple_value(
+                        self._field_value(fields, "satisfaction", ["satisfaction"])
+                    ),
+                    "work_category": self._simple_value(
+                        self._field_value(fields, "work_category", ["work category"])
+                    ),
+                    "sentiment": self._simple_value(
+                        self._field_value(fields, "sentiment", ["sentiment"])
+                    ),
+                    "time_to_close": self._simple_value(
+                        self._field_value(fields, "time_to_close", ["time to close"])
+                    ),
+                    "time_to_qualified_answer": self._simple_value(
+                        self._field_value(fields, "time_to_qualified_answer", ["time to qualified answer"])
+                    ),
+                    "time_to_resolution": self._simple_value(
+                        self._field_value(fields, "time_to_resolution", ["time to resolution"])
+                    ),
+
                     "created": issue.get("created"),
                     "resolved": issue.get("resolved"),
                     "updated": issue.get("updated"),
