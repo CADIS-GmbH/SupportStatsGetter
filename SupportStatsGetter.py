@@ -322,6 +322,7 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
         fields.get("request-channel-source")
         or fields.get("request-channel-type")
     )
+    result["RequestChannelType"] = fields.get("request-channel-type")
     result["FirstResponseDate"] = extract_first_response_date(comments)
     result["LastResponseDate"] = extract_last_response_date(comments)
     result["UpdatedWeek"] = cw_string_from_datetime(updated)
@@ -503,6 +504,7 @@ class SQLiteStore:
             Column("resolved", DateTime, nullable=True),
             Column("updated", DateTime),
             Column("ticket_source", String),
+            Column("request_channel_type", String),
             Column("created_week", String),
             Column("resolved_week", String),
             Column("updated_week", String),
@@ -721,6 +723,9 @@ class SQLiteStore:
         if "ticket_source" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN ticket_source VARCHAR"))
+        if "request_channel_type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN request_channel_type VARCHAR"))
         if "assignee" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN assignee VARCHAR"))
@@ -1023,9 +1028,7 @@ class SupportStatsGetter:
             if issue_row.get("deployment_type"):
                 fields["Deployment type"] = issue_row.get("deployment_type")
             if issue_row.get("organizations"):
-                fields["Organizations"] = [
-                    o for o in issue_row.get("organizations", "").split(",") if o
-                ]
+                fields["Organizations"] = [o for o in issue_row.get("organizations", "").split(",") if o]
             if issue_row.get("resolution"):
                 fields["resolution"] = {"name": issue_row.get("resolution")}
             if issue_row.get("satisfaction"):
@@ -1274,10 +1277,12 @@ class SupportStatsGetter:
                     "time_to_resolution": self._simple_value(
                         self._field_value(fields, "time_to_resolution", ["time to resolution"])
                     ),
+
                     "created": issue.get("created"),
                     "resolved": issue.get("resolved"),
                     "updated": issue.get("updated"),
                     "ticket_source": issue.get("TicketSource"),
+                    "request_channel_type": issue.get("RequestChannelType"),
                     "created_week": issue.get("CreatedWeek"),
                     "resolved_week": issue.get("ResolvedWeek"),
                     "updated_week": issue.get("UpdatedWeek"),
