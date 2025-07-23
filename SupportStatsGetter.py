@@ -716,6 +716,22 @@ class SQLiteStore:
             conn.execute(text("DROP VIEW IF EXISTS jira_calendar_reporting"))
             conn.execute(text(calendar_view_sql))
 
+        activeweeks_view_sql = """
+            CREATE VIEW IF NOT EXISTS jira_tickets_active_weeks AS
+            SELECT
+                jt.*,
+                aw.value AS active_week,
+                wr.reporting_month AS active_reportingmonth,
+                wr.reporting_quarter AS active_reportingquarter
+            FROM jira_tickets jt
+            JOIN json_each('["' || replace(jt.active_weeks, ',', '","') || '"]') aw
+                ON 1=1
+            LEFT JOIN week_reporting wr ON wr.calendar_week = aw.value
+        """
+        with self.engine.begin() as conn:
+            conn.execute(text("DROP VIEW IF EXISTS jira_tickets_active_weeks"))
+            conn.execute(text(activeweeks_view_sql))
+
         ticket_worklogs_view_sql = """
             CREATE VIEW IF NOT EXISTS jira_tickets_worklogs AS
             SELECT
