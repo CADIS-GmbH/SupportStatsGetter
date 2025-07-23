@@ -13,7 +13,11 @@ This project collects ticket statistics from **Jira Service Management** and sto
   "db_path": "support_stats.sqlite",
   "base_jql": "project = DEMO",
   "log_level": "INFO",
-  "log_file": "support_stats.log"
+  "log_file": "support_stats.log",
+  "custom_fields": {
+    "request_type": "customfield_10010",
+    "deployment_type": "customfield_10011"
+  }
 }
 ```
 2. Install the dependencies:
