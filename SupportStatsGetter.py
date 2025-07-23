@@ -23,6 +23,9 @@ import re
 # Email patterns of internal agents used to detect response times. The patterns
 # are loaded from the ``internal_users`` table at runtime.
 INTERNAL_EMAIL_PATTERNS: list[Pattern[str]] = []
+# Patterns used to map organization names to a primary organization. Loaded
+# from the ``org_lookup`` table at runtime.
+ORG_PATTERNS: list[tuple[Pattern[str], str, int]] = []
 
 # Mapping of priority names to numeric positions
 PRIORITY_POS_MAP = {
@@ -110,6 +113,7 @@ class Config:
     base_jql: str | None = None
     log_level: str = "INFO"
     log_file: Path = Path("support_stats.log")
+    custom_fields: dict[str, str] = field(default_factory=dict)
 
     @staticmethod
     @log_call
@@ -124,6 +128,7 @@ class Config:
             base_jql=data.get("base_jql"),
             log_level=data.get("log_level", "INFO"),
             log_file=Path(data.get("log_file", "support_stats.log")),
+            custom_fields=data.get("custom_fields", {}),
         )
 
 
@@ -230,6 +235,30 @@ def group_from_labels(labels: list[str]) -> str:
         if grp in labels:
             return grp
     return "1stLevel"
+
+
+def primary_org_from_names(names: list[str]) -> str | None:
+    """Return the primary organization for a list of organization names."""
+    best_primary = None
+    best_priority = -1
+    best_index = len(names)
+    for idx, name in enumerate(names):
+        org_best_primary = None
+        org_best_prio = -1
+        for pattern, primary, priority in ORG_PATTERNS:
+            if pattern.search(name):
+                if priority > org_best_prio:
+                    org_best_prio = priority
+                    org_best_primary = primary
+        if org_best_primary is None:
+            continue
+        if org_best_prio > best_priority or (
+            org_best_prio == best_priority and idx < best_index
+        ):
+            best_primary = org_best_primary
+            best_priority = org_best_prio
+            best_index = idx
+    return best_primary
 
 
 def extract_resolved_date(changelog: list[dict[str, Any]]) -> datetime.datetime | None:
@@ -484,6 +513,17 @@ class SQLiteStore:
             Column("last_response_date_week", String),
             Column("first_response_time_minutes", Integer),
             Column("resolution_time_days", Float),
+            Column("request_type", String),
+            Column("deployment_type", String),
+            Column("organizations", Text),
+            Column("primary_organization", String),
+            Column("resolution", String),
+            Column("satisfaction", String),
+            Column("work_category", String),
+            Column("sentiment", String),
+            Column("time_to_close", Float),
+            Column("time_to_qualified_answer", Float),
+            Column("time_to_resolution", Float),
         )
         self.jira_comments = Table(
             "jira_comments",
@@ -569,6 +609,13 @@ class SQLiteStore:
             "internal_users",
             self.meta,
             Column("pattern", String, primary_key=True),
+        )
+        self.org_lookup = Table(
+            "org_lookup",
+            self.meta,
+            Column("regex", String, primary_key=True),
+            Column("primary_org", String),
+            Column("priority", Integer),
         )
         self.week_reporting = Table(
             "week_reporting",
@@ -722,6 +769,39 @@ class SQLiteStore:
         if "resolution_time_days" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN resolution_time_days FLOAT"))
+        if "request_type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN request_type VARCHAR"))
+        if "deployment_type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN deployment_type VARCHAR"))
+        if "organizations" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN organizations TEXT"))
+        if "primary_organization" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN primary_organization VARCHAR"))
+        if "resolution" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN resolution VARCHAR"))
+        if "satisfaction" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN satisfaction VARCHAR"))
+        if "work_category" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN work_category VARCHAR"))
+        if "sentiment" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN sentiment VARCHAR"))
+        if "time_to_close" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN time_to_close FLOAT"))
+        if "time_to_qualified_answer" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN time_to_qualified_answer FLOAT"))
+        if "time_to_resolution" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN time_to_resolution FLOAT"))
 
         cols = [c["name"] for c in inspector.get_columns("jira_calendar")]
         if "start_assigned_user_email" not in cols:
@@ -795,6 +875,24 @@ class SQLiteStore:
         with self.engine.connect() as conn:
             rows = conn.execute(select(self.internal_users.c.pattern)).fetchall()
         return [re.compile(r[0], re.IGNORECASE) for r in rows]
+
+    @log_call
+    def load_org_patterns(self) -> list[tuple[Pattern[str], str, int]]:
+        inspector = sa_inspect(self.engine)
+        if "org_lookup" not in inspector.get_table_names():
+            return []
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(self.org_lookup.c.regex,
+                                       self.org_lookup.c.primary_org,
+                                       self.org_lookup.c.priority)).fetchall()
+        compiled: list[tuple[Pattern[str], str, int]] = []
+        for regex, primary, prio in rows:
+            try:
+                pat = re.compile(regex, re.IGNORECASE)
+            except re.error:
+                continue
+            compiled.append((pat, primary, int(prio or 0)))
+        return compiled
 
     @log_call
     def get_ticket_with_related(self, ticket_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -873,6 +971,24 @@ class SupportStatsGetter:
         self.store = SQLiteStore(create_engine(f"sqlite+pysqlite:///{config.db_path}"))
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
+        global ORG_PATTERNS
+        ORG_PATTERNS = self.store.load_org_patterns()
+
+    def _field_value(
+        self,
+        fields: Mapping[str, Any],
+        logical: str,
+        fallbacks: Iterable[str] | None = None,
+    ) -> Any:
+        """Return the value for a logical field name respecting custom mapping."""
+        name = self.config.custom_fields.get(logical)
+        if name and name in fields:
+            return fields.get(name)
+        fallbacks = fallbacks or []
+        for key in fallbacks:
+            if key in fields:
+                return fields.get(key)
+        return None
 
     def _jira_auth(self) -> tuple[str, str] | None:
         if self.config.jira_user and self.config.jira_token:
@@ -902,6 +1018,28 @@ class SupportStatsGetter:
                 fields["labels"] = [l for l in issue_row.get("labels", "").split(",") if l]
             if issue_row.get("priority"):
                 fields["priority"] = {"name": issue_row.get("priority")}
+            if issue_row.get("request_type"):
+                fields["requestType"] = issue_row.get("request_type")
+            if issue_row.get("deployment_type"):
+                fields["Deployment type"] = issue_row.get("deployment_type")
+            if issue_row.get("organizations"):
+                fields["Organizations"] = [
+                    o for o in issue_row.get("organizations", "").split(",") if o
+                ]
+            if issue_row.get("resolution"):
+                fields["resolution"] = {"name": issue_row.get("resolution")}
+            if issue_row.get("satisfaction"):
+                fields["satisfaction"] = issue_row.get("satisfaction")
+            if issue_row.get("work_category"):
+                fields["work category"] = issue_row.get("work_category")
+            if issue_row.get("sentiment"):
+                fields["sentiment"] = issue_row.get("sentiment")
+            if issue_row.get("time_to_close") is not None:
+                fields["time to close"] = issue_row.get("time_to_close")
+            if issue_row.get("time_to_qualified_answer") is not None:
+                fields["time to qualified answer"] = issue_row.get("time_to_qualified_answer")
+            if issue_row.get("time_to_resolution") is not None:
+                fields["time to resolution"] = issue_row.get("time_to_resolution")
             issue = {
                 "id": issue_row["id"],
                 "key": issue_row.get("key"),
@@ -1095,6 +1233,47 @@ class SupportStatsGetter:
                     "creator_email": (fields.get("creator") or {}).get("emailAddress"),
                     "labels": ",".join(fields.get("labels") or []),
                     "priority": (fields.get("priority") or {}).get("name"),
+                    "request_type": self._simple_value(
+                        self._field_value(fields, "request_type", ["requestType"])
+                    ),
+                    "deployment_type": self._simple_value(
+                        self._field_value(fields, "deployment_type", ["Deployment type"])
+                    ),
+                    "organizations": ",".join(
+                        [
+                            o.get("name") if isinstance(o, dict) else str(o)
+                            for o in (
+                                self._field_value(fields, "organizations", ["Organizations"]) or []
+                            )
+                        ]
+                    ),
+                    "primary_organization": primary_org_from_names([
+                        o.get("name") if isinstance(o, dict) else str(o)
+                        for o in (
+                            self._field_value(fields, "organizations", ["Organizations"]) or []
+                        )
+                    ]) or None,
+                    "resolution": self._simple_value(
+                        self._field_value(fields, "resolution", ["resolution"])
+                    ),
+                    "satisfaction": self._simple_value(
+                        self._field_value(fields, "satisfaction", ["satisfaction"])
+                    ),
+                    "work_category": self._simple_value(
+                        self._field_value(fields, "work_category", ["work category"])
+                    ),
+                    "sentiment": self._simple_value(
+                        self._field_value(fields, "sentiment", ["sentiment"])
+                    ),
+                    "time_to_close": self._simple_value(
+                        self._field_value(fields, "time_to_close", ["time to close"])
+                    ),
+                    "time_to_qualified_answer": self._simple_value(
+                        self._field_value(fields, "time_to_qualified_answer", ["time to qualified answer"])
+                    ),
+                    "time_to_resolution": self._simple_value(
+                        self._field_value(fields, "time_to_resolution", ["time to resolution"])
+                    ),
                     "created": issue.get("created"),
                     "resolved": issue.get("resolved"),
                     "updated": issue.get("updated"),
@@ -1207,6 +1386,18 @@ class SupportStatsGetter:
             return ""
 
         return _inner(node).strip()
+
+    @staticmethod
+    def _simple_value(val: Any) -> Any:
+        """Return a basic value from a Jira field entry."""
+        if isinstance(val, dict):
+            for key in ("value", "name", "text"):
+                if key in val:
+                    return val.get(key)
+            return None
+        if isinstance(val, list):
+            return ",".join(str(SupportStatsGetter._simple_value(v) or v) for v in val)
+        return val
 
     @staticmethod
     def _parse_ts(value: str | None) -> datetime.datetime | None:
