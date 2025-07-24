@@ -238,7 +238,11 @@ def group_from_labels(labels: list[str]) -> str:
 
 
 def primary_org_from_names(names: list[str]) -> str | None:
-    """Return the primary organization for a list of organization names."""
+    """Return the primary organization for a list of organization names.
+
+    If no match is found via ``ORG_PATTERNS`` and ``names`` is not empty,
+    the first organization name is returned instead of ``None``.
+    """
     best_primary = None
     best_priority = -1
     best_index = len(names)
@@ -258,7 +262,9 @@ def primary_org_from_names(names: list[str]) -> str | None:
             best_primary = org_best_primary
             best_priority = org_best_prio
             best_index = idx
-    return best_primary
+    if best_primary is not None:
+        return best_primary
+    return names[0] if names else None
 
 
 def extract_resolved_date(changelog: list[dict[str, Any]]) -> datetime.datetime | None:
