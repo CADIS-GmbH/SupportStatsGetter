@@ -510,7 +510,6 @@ class SQLiteStore:
             Column("created", DateTime),
             Column("resolved", DateTime, nullable=True),
             Column("updated", DateTime),
-            Column("ticket_source", String),
             Column("request_channel_type", String),
             Column("created_week", String),
             Column("resolved_week", String),
@@ -530,9 +529,6 @@ class SQLiteStore:
             Column("satisfaction", String),
             Column("work_category", String),
             Column("sentiment", String),
-            Column("time_to_close", Float),
-            Column("time_to_qualified_answer", Float),
-            Column("time_to_resolution", Float),
         )
         self.jira_comments = Table(
             "jira_comments",
@@ -754,9 +750,6 @@ class SQLiteStore:
         if "updated" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN updated DATETIME"))
-        if "ticket_source" not in cols:
-            with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN ticket_source VARCHAR"))
         if "request_channel_type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN request_channel_type VARCHAR"))
@@ -835,15 +828,6 @@ class SQLiteStore:
         if "sentiment" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN sentiment VARCHAR"))
-        if "time_to_close" not in cols:
-            with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN time_to_close FLOAT"))
-        if "time_to_qualified_answer" not in cols:
-            with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN time_to_qualified_answer FLOAT"))
-        if "time_to_resolution" not in cols:
-            with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN time_to_resolution FLOAT"))
 
         cols = [c["name"] for c in inspector.get_columns("jira_calendar")]
         if "start_assigned_user_email" not in cols:
@@ -1074,12 +1058,6 @@ class SupportStatsGetter:
                 fields["work category"] = issue_row.get("work_category")
             if issue_row.get("sentiment"):
                 fields["sentiment"] = issue_row.get("sentiment")
-            if issue_row.get("time_to_close") is not None:
-                fields["time to close"] = issue_row.get("time_to_close")
-            if issue_row.get("time_to_qualified_answer") is not None:
-                fields["time to qualified answer"] = issue_row.get("time_to_qualified_answer")
-            if issue_row.get("time_to_resolution") is not None:
-                fields["time to resolution"] = issue_row.get("time_to_resolution")
             issue = {
                 "id": issue_row["id"],
                 "key": issue_row.get("key"),
@@ -1308,20 +1286,10 @@ class SupportStatsGetter:
                     "sentiment": self._simple_value(
                         self._field_value(fields, "sentiment", ["sentiment"])
                     ),
-                    "time_to_close": self._simple_value(
-                        self._field_value(fields, "time_to_close", ["time to close"])
-                    ),
-                    "time_to_qualified_answer": self._simple_value(
-                        self._field_value(fields, "time_to_qualified_answer", ["time to qualified answer"])
-                    ),
-                    "time_to_resolution": self._simple_value(
-                        self._field_value(fields, "time_to_resolution", ["time to resolution"])
-                    ),
 
                     "created": issue.get("created"),
                     "resolved": issue.get("resolved"),
                     "updated": issue.get("updated"),
-                    "ticket_source": issue.get("TicketSource"),
                     "request_channel_type": issue.get("RequestChannelType"),
                     "created_week": issue.get("CreatedWeek"),
                     "resolved_week": issue.get("ResolvedWeek"),
