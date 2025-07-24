@@ -222,7 +222,7 @@ def is_internal_user(author: Mapping[str, Any] | None) -> bool:
         return False
 
     account_type = author.get("accountType")
-    if account_type == "customer":
+    if account_type in ("customer", "app"):
         return False
     if account_type:
         return True
@@ -289,7 +289,7 @@ def extract_first_response_date(comments: list[dict[str, Any]]) -> datetime.date
         internal = c.get("internal_user")
         if internal is None:
             internal = is_internal_user(author if isinstance(author, dict) else None)
-        if idx > 0 and c.get("public") and internal:
+        if c.get("public") and internal:
             return c.get("created")
         idx += 1
     return None
@@ -1404,8 +1404,10 @@ class SupportStatsGetter:
     def _simple_value(val: Any) -> Any:
         """Return a basic value from a Jira field entry."""
         if isinstance(val, dict):
-            for key in ("value", "name", "text"):
+            for key in ("value", "name", "text", "requestType"):
                 if key in val:
+                    if key == "requestType":
+                        return val.get(key, {}).get("name")
                     return val.get(key)
             return None
         if isinstance(val, list):
