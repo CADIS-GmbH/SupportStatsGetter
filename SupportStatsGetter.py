@@ -669,7 +669,11 @@ class SQLiteStore:
         view_sql = """
             CREATE VIEW IF NOT EXISTS jira_tickets_reporting AS
             SELECT
-                jt.*, 
+                jt.*,
+                CASE
+                    WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
+                    ELSE 'SW'
+                END AS request_type_category,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingmonth,
                 (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingquarter,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.resolved_week) AS resolved_reportingmonth,
@@ -716,6 +720,10 @@ class SQLiteStore:
             CREATE VIEW IF NOT EXISTS jira_tickets_active_weeks AS
             SELECT
                 jt.*,
+                CASE
+                    WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
+                    ELSE 'SW'
+                END AS request_type_category,
                 aw.value AS active_week,
                 wr.reporting_month AS active_reportingmonth,
                 wr.reporting_quarter AS active_reportingquarter
@@ -731,7 +739,12 @@ class SQLiteStore:
         ticket_worklogs_view_sql = """
             CREATE VIEW IF NOT EXISTS jira_tickets_worklogs AS
             SELECT
-                jt.*, jw.*
+                jt.*,
+                CASE
+                    WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
+                    ELSE 'SW'
+                END AS request_type_category,
+                jw.*
             FROM jira_tickets jt
             LEFT JOIN jira_worklogs jw ON jt.id = jw.ticket_id
         """
