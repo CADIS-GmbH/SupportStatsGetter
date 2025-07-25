@@ -324,11 +324,6 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     result["ResolvedWeek"] = cw_string_from_datetime(resolved)
     result["ActiveWeeks"] = active_weeks(created, resolved or updated)
     fields = result.get("fields", {})
-    result["TicketSource"] = (
-        fields.get("request-channel-source")
-        or fields.get("request-channel-type")
-    )
-    result["RequestChannelType"] = fields.get("request-channel-type")
     result["FirstResponseDate"] = extract_first_response_date(comments)
     result["LastResponseDate"] = extract_last_response_date(comments)
     result["UpdatedWeek"] = cw_string_from_datetime(updated)
@@ -510,7 +505,6 @@ class SQLiteStore:
             Column("created", DateTime),
             Column("resolved", DateTime, nullable=True),
             Column("updated", DateTime),
-            Column("request_channel_type", String),
             Column("created_week", String),
             Column("resolved_week", String),
             Column("updated_week", String),
@@ -675,7 +669,11 @@ class SQLiteStore:
         view_sql = """
             CREATE VIEW IF NOT EXISTS jira_tickets_reporting AS
             SELECT
-                jt.*, 
+                jt.*,
+                CASE
+                    WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
+                    ELSE 'SW'
+                END AS request_type_category,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingmonth,
                 (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingquarter,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.resolved_week) AS resolved_reportingmonth,
@@ -722,6 +720,10 @@ class SQLiteStore:
             CREATE VIEW IF NOT EXISTS jira_tickets_active_weeks AS
             SELECT
                 jt.*,
+                CASE
+                    WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
+                    ELSE 'SW'
+                END AS request_type_category,
                 aw.value AS active_week,
                 wr.reporting_month AS active_reportingmonth,
                 wr.reporting_quarter AS active_reportingquarter
@@ -737,7 +739,12 @@ class SQLiteStore:
         ticket_worklogs_view_sql = """
             CREATE VIEW IF NOT EXISTS jira_tickets_worklogs AS
             SELECT
-                jt.*, jw.*
+                jt.*,
+                CASE
+                    WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
+                    ELSE 'SW'
+                END AS request_type_category,
+                jw.*
             FROM jira_tickets jt
             LEFT JOIN jira_worklogs jw ON jt.id = jw.ticket_id
         """
@@ -750,9 +757,6 @@ class SQLiteStore:
         if "updated" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN updated DATETIME"))
-        if "request_channel_type" not in cols:
-            with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN request_channel_type VARCHAR"))
         if "assignee" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN assignee VARCHAR"))
@@ -1291,7 +1295,6 @@ class SupportStatsGetter:
                     "created": issue.get("created"),
                     "resolved": issue.get("resolved"),
                     "updated": issue.get("updated"),
-                    "request_channel_type": issue.get("RequestChannelType"),
                     "created_week": issue.get("CreatedWeek"),
                     "resolved_week": issue.get("ResolvedWeek"),
                     "updated_week": issue.get("UpdatedWeek"),

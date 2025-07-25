@@ -385,7 +385,6 @@ def calculate_kpi_values(tickets):
 
         t["ActiveWeeks"] = __get_cws_active(t)
         t["CreatedWeek"] = cw_string_from_isodate(t["DateCreated"])
-        t["TicketSource"] = t["TicketSource"][0] if len(t["TicketSource"]) > 0 else None
         if (t["Status"].find("Closed") >= 0) and len(t["History"]) > 0:
             t["ResolvedDate"] = __extract_resolve_date(t["History"])
             t["ResolvedWeek"] = cw_string_from_isodate(t["ResolvedDate"])
@@ -645,16 +644,26 @@ def load_tickets(base_url: str, path: str, username: str, password, filter_param
                     print(f'Get attachemnts {act_url}')
 
                     try:
-                        response = requests.get(act_url, headers=h,  stream=True)  # Stream to avoid loading large files into memory
+                        response = requests.get(
+                            act_url,
+                            headers=h,
+                            stream=True,
+                        )  # Stream to avoid loading large files into memory
                         response.raise_for_status()  # Raise an error for bad responses (4xx and 5xx)
 
-                        save_path = f"{attachment_save_dir}/#{t["TicketNumber"]}_atmt_{atm_file["ID"]}_{atm_file["FileName"]}"
+                        save_path = (
+                            f"{attachment_save_dir}/#{t['TicketNumber']}_atmt_"
+                            f"{atm_file['ID']}_{atm_file['FileName']}"
+                        )
                         with open(save_path, 'wb') as file:
-                            for chunk in response.iter_content(chunk_size=8192):  # Read in chunks
+                            for chunk in response.iter_content(chunk_size=8192):
                                 file.write(chunk)
                             print(f"File downloaded successfully: {save_path}")
                     except Exception as e:
-                        print(f"WARNING: failed to write attachment #{t["TicketNumber"]}_atmt_{atm_file["ID"]}_{atm_file["FileName"]}: {str(e)}")
+                        print(
+                            f"WARNING: failed to write attachment #{t['TicketNumber']}_atmt_"
+                            f"{atm_file['ID']}_{atm_file['FileName']}: {str(e)}"
+                        )
 
 
         t["Calendar"] = make_ticket_calendar(t)
