@@ -1195,7 +1195,8 @@ class SupportStatsGetter:
         if extra:
             parts.append(f"({extra})")
         if updated_since:
-            ts = updated_since.astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M")
+            get_since = updated_since - datetime.timedelta(days=10)
+            ts = get_since.astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M")
             parts.append(f"updated >= \"{ts}\"")
         final_jql = " AND ".join(parts)
 
@@ -1404,7 +1405,7 @@ class SupportStatsGetter:
     def _simple_value(val: Any) -> Any:
         """Return a basic value from a Jira field entry."""
         if isinstance(val, dict):
-            for key in ("value", "name", "text", "requestType"):
+            for key in ("value", "name", "text", "requestType", "rating"):
                 if key in val:
                     if key == "requestType":
                         return val.get(key, {}).get("name")
