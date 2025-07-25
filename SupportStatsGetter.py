@@ -195,7 +195,7 @@ def active_weeks(start: datetime.datetime | None, end: datetime.datetime | None)
     d = start
     while d <= end:
         weeks.add(cw_string_from_datetime(d))
-        d += datetime.timedelta(days=7)
+        d += datetime.timedelta(minutes=1)
     weeks.add(cw_string_from_datetime(end))
     return ",".join(sorted(weeks))
 
