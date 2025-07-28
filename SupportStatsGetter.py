@@ -529,6 +529,7 @@ class SQLiteStore:
             Column("primary_organization", String),
             Column("resolution", String),
             Column("satisfaction", String),
+            Column("satisfaction_ts", DateTime),
             Column("work_category", String),
             Column("sentiment", String),
         )
@@ -961,6 +962,9 @@ class SQLiteStore:
         if "satisfaction" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN satisfaction VARCHAR"))
+        if "satisfaction_ts" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN satisfaction_ts DATETIME"))
         if "work_category" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN work_category VARCHAR"))
@@ -1189,12 +1193,14 @@ class SupportStatsGetter:
                 fields["Deployment type"] = issue_row.get("deployment_type")
             if issue_row.get("organizations"):
                 fields["Organizations"] = [o for o in issue_row.get("organizations", "").split(",") if o]
-            if issue_row.get("resolution"):
-                fields["resolution"] = {"name": issue_row.get("resolution")}
-            if issue_row.get("satisfaction"):
-                fields["satisfaction"] = issue_row.get("satisfaction")
-            if issue_row.get("work_category"):
-                fields["work category"] = issue_row.get("work_category")
+        if issue_row.get("resolution"):
+            fields["resolution"] = {"name": issue_row.get("resolution")}
+        if issue_row.get("satisfaction"):
+            fields["satisfaction"] = issue_row.get("satisfaction")
+        if issue_row.get("satisfaction_ts"):
+            fields["satisfaction_ts"] = issue_row.get("satisfaction_ts")
+        if issue_row.get("work_category"):
+            fields["work category"] = issue_row.get("work_category")
             if issue_row.get("sentiment"):
                 fields["sentiment"] = issue_row.get("sentiment")
             issue = {
@@ -1381,6 +1387,8 @@ class SupportStatsGetter:
             fields = issue.get("fields", {})
             prio_txt = (fields.get("priority") or {}).get("name")
             prio_pos = PRIORITY_POS_MAP.get(prio_txt, 0)
+            sat_field = self._field_value(fields, "satisfaction", ["satisfaction"])
+            sat_ts_field = self._field_value(fields, "satisfaction_ts", ["satisfaction_ts"])
             records.append(
                 {
                     "id": issue["id"],
@@ -1417,9 +1425,8 @@ class SupportStatsGetter:
                     "resolution": self._simple_value(
                         self._field_value(fields, "resolution", ["resolution"])
                     ),
-                    "satisfaction": self._simple_value(
-                        self._field_value(fields, "satisfaction", ["satisfaction"])
-                    ),
+                    "satisfaction": self._simple_value(sat_field),
+                    "satisfaction_ts": self._parse_ts(sat_ts_field),
                     "work_category": self._simple_value(
                         self._field_value(fields, "work_category", ["work category"])
                     ),
