@@ -64,6 +64,9 @@ NO_CONTACT_IGNORE_STATUSES = {
     "WAITING FOR CUSTOMER",
 }
 
+#the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
+JIRA_PULL_OVERLAP_MIN = 5
+
 import requests
 import dateutil.parser
 import pytz
@@ -1395,7 +1398,7 @@ class SupportStatsGetter:
         if extra:
             parts.append(f"({extra})")
         if updated_since:
-            get_since = updated_since - datetime.timedelta(days=7)
+            get_since = updated_since - datetime.timedelta(minutes=JIRA_PULL_OVERLAP_MIN)
             ts = get_since.astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M")
             parts.append(f"updated >= \"{ts}\"")
         final_jql = " AND ".join(parts)
