@@ -175,7 +175,9 @@ class JiraCalendarRecord:
     cw: str = field(init=False)
     weekday: int = field(init=False)
     record_id: str = field(init=False)
-    date_modified: datetime.datetime = field(default_factory=lambda: datetime.datetime.utcnow())
+    date_modified: datetime.datetime = field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC)
+    )
 
     def __post_init__(self) -> None:
         if isinstance(self.date, datetime.datetime):
@@ -361,7 +363,11 @@ def make_jira_ticket_calendar(
     created = issue.get("created")
     if not created:
         return []
-    end_dt = issue.get("resolved") or issue.get("updated") or datetime.datetime.utcnow()
+    end_dt = (
+        issue.get("resolved")
+        or issue.get("updated")
+        or datetime.datetime.now(datetime.UTC)
+    )
 
     fields = issue.get("fields") or {}
     start_status = (fields.get("status") or {}).get("name", "Open")
@@ -763,63 +769,69 @@ class SQLiteStore:
 
         statuses = ",".join(f"'{s.lower()}'" for s in NO_CONTACT_IGNORE_STATUSES)
 
-        weekly_report_view_sql = f"""
-            CREATE VIEW IF NOT EXISTS weekly_support_summary AS
+        summary_view_template = """
+            CREATE VIEW IF NOT EXISTS {view_name} AS
             WITH
                 active AS (
                     SELECT
-                        active_week AS week,
+                        wr.{period_col} AS period,
                         COUNT(DISTINCT id) AS ongoing,
                         COUNT(DISTINCT CASE WHEN request_type_category = 'SW' THEN id END) AS open_sw,
                         COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS open_dis,
                         COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS open_hw
                     FROM jira_tickets_active_weeks
+                    JOIN week_reporting wr ON wr.calendar_week = active_week
                     WHERE COALESCE(status, '') != 'Cancelled'
-                    GROUP BY active_week
+                    GROUP BY wr.{period_col}
                 ),
                 friday AS (
                     SELECT
-                        jc.cw AS week,
+                        wr.{period_col} AS period,
                         COUNT(DISTINCT jc.ticket_id) AS overall_open,
+                        COUNT(DISTINCT CASE WHEN DATE(jt.created) <= DATE(jc.date, '-5 day') THEN jc.ticket_id END) AS aged_5,
                         COUNT(DISTINCT CASE WHEN DATE(jt.created) <= DATE(jc.date, '-30 day') THEN jc.ticket_id END) AS aged_30,
                         COUNT(DISTINCT CASE WHEN jt.assignee IS NULL OR jt.assignee = '' THEN jc.ticket_id END) AS unassigned,
                         COUNT(DISTINCT CASE WHEN LOWER(jc.end_status) NOT IN ({statuses}) AND jc.weekdays_days_since_last_contact > 5 THEN jc.ticket_id END) AS over5_no_contact
                     FROM jira_calendar jc
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
+                    JOIN week_reporting wr ON wr.calendar_week = jc.cw
                     WHERE jc.weekday = 5
                       AND LOWER(jc.end_status) NOT IN ('resolved','closed','cancelled')
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
-                    GROUP BY jc.cw
+                    GROUP BY wr.{period_col}
                 ),
                 highprio AS (
-                    SELECT jc.cw AS week, COUNT(DISTINCT jc.ticket_id) AS high_critical
+                    SELECT wr.{period_col} AS period, COUNT(DISTINCT jc.ticket_id) AS high_critical
                     FROM jira_calendar jc
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
+                    JOIN week_reporting wr ON wr.calendar_week = jc.cw
                     WHERE (jc.start_priority_pos >= 300 OR jc.end_priority_pos >= 300)
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
-                    GROUP BY jc.cw
+                    GROUP BY wr.{period_col}
                 ),
                 escalated AS (
-                    SELECT jc.cw AS week, COUNT(DISTINCT jc.ticket_id) AS escalated
+                    SELECT wr.{period_col} AS period, COUNT(DISTINCT jc.ticket_id) AS escalated
                     FROM jira_calendar jc
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
+                    JOIN week_reporting wr ON wr.calendar_week = jc.cw
                     WHERE jc.did_escalate_priority = 1
                       AND jc.end_priority_pos >= 300
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
-                    GROUP BY jc.cw
+                    GROUP BY wr.{period_col}
                 ),
                 newt AS (
-                    SELECT created_week AS week, COUNT(*) AS new_tickets
-                    FROM jira_tickets
-                    WHERE COALESCE(status, '') != 'Cancelled'
-                    GROUP BY created_week
+                    SELECT wr.{period_col} AS period, COUNT(*) AS new_tickets
+                    FROM jira_tickets jt
+                    JOIN week_reporting wr ON wr.calendar_week = jt.created_week
+                    WHERE COALESCE(jt.status, '') != 'Cancelled'
+                    GROUP BY wr.{period_col}
                 ),
                 closed AS (
                     SELECT
-                        resolved_week AS week,
+                        wr.{period_col} AS period,
                         COUNT(*) AS closed_tickets,
                         COUNT(DISTINCT CASE WHEN request_type_category = 'SW' THEN id END) AS closed_sw,
                         COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS closed_dis,
@@ -827,30 +839,30 @@ class SQLiteStore:
                         AVG(resolution_time_days) AS avg_resolution_days,
                         AVG((CAST(satisfaction AS REAL) - 1.0) / 4.0) AS csat_score,
                         COUNT(satisfaction) AS csat_answers
-                    FROM jira_tickets_reporting
-                    WHERE resolved_week IS NOT NULL
-                      AND COALESCE(status, '') != 'Cancelled'
-                    GROUP BY resolved_week
+                    FROM jira_tickets_reporting jtr
+                    JOIN week_reporting wr ON wr.calendar_week = jtr.resolved_week
+                    WHERE jtr.resolved_week IS NOT NULL
+                      AND COALESCE(jtr.status, '') != 'Cancelled'
+                    GROUP BY wr.{period_col}
                 ),
                 median_fr AS (
-                    SELECT week, AVG(first_response_time_minutes) AS median_first_reply
+                    SELECT period, AVG(first_response_time_minutes) AS median_first_reply
                     FROM (
                         SELECT
-                            first_response_date_week AS week,
-                            first_response_time_minutes,
-                            ROW_NUMBER() OVER (PARTITION BY first_response_date_week ORDER BY first_response_time_minutes) AS rn,
-                            COUNT(*) OVER (PARTITION BY first_response_date_week) AS cnt
-                        FROM jira_tickets
-                        WHERE first_response_time_minutes IS NOT NULL
-                          AND COALESCE(status, '') != 'Cancelled'
+                            wr.{period_col} AS period,
+                            jt.first_response_time_minutes,
+                            ROW_NUMBER() OVER (PARTITION BY wr.{period_col} ORDER BY jt.first_response_time_minutes) AS rn,
+                            COUNT(*) OVER (PARTITION BY wr.{period_col}) AS cnt
+                        FROM jira_tickets jt
+                        JOIN week_reporting wr ON wr.calendar_week = jt.first_response_date_week
+                        WHERE jt.first_response_time_minutes IS NOT NULL
+                          AND COALESCE(jt.status, '') != 'Cancelled'
                     ) t
                     WHERE rn IN ((cnt + 1)/2, (cnt + 2)/2)
-                    GROUP BY week
+                    GROUP BY period
                 )
             SELECT
-                wr.calendar_week AS week,
-                wr.reporting_month AS month,
-                wr.reporting_quarter AS quarter,
+                {select_cols}
                 COALESCE(active.ongoing, 0) AS ongoing_tickets,
                 COALESCE(friday.overall_open, 0) AS fri_open_tickets,
                 COALESCE(highprio.high_critical, 0) AS high_or_critical_tickets,
@@ -871,22 +883,55 @@ class SQLiteStore:
                 COALESCE(closed.closed_dis, 0) AS closed_dis,
                 COALESCE(closed.closed_hw, 0) AS closed_hw,
                 COALESCE(friday.aged_30, 0) AS aged_30_plus,
+                COALESCE(friday.aged_5, 0) AS aged_5_plus,
                 COALESCE(friday.overall_open, 0) AS overall_open,
                 COALESCE(friday.unassigned, 0) AS unassigned,
                 COALESCE(friday.over5_no_contact, 0) AS over5_days_no_contact
             FROM week_reporting wr
-            LEFT JOIN active ON active.week = wr.calendar_week
-            LEFT JOIN friday ON friday.week = wr.calendar_week
-            LEFT JOIN highprio ON highprio.week = wr.calendar_week
-            LEFT JOIN escalated ON escalated.week = wr.calendar_week
-            LEFT JOIN newt ON newt.week = wr.calendar_week
-            LEFT JOIN closed ON closed.week = wr.calendar_week
-            LEFT JOIN median_fr ON median_fr.week = wr.calendar_week
-            ORDER BY wr.calendar_week
+            LEFT JOIN active ON active.period = wr.{period_col}
+            LEFT JOIN friday ON friday.period = wr.{period_col}
+            LEFT JOIN highprio ON highprio.period = wr.{period_col}
+            LEFT JOIN escalated ON escalated.period = wr.{period_col}
+            LEFT JOIN newt ON newt.period = wr.{period_col}
+            LEFT JOIN closed ON closed.period = wr.{period_col}
+            LEFT JOIN median_fr ON median_fr.period = wr.{period_col}
+            GROUP BY wr.{period_col}
+            ORDER BY wr.{period_col}
         """
+
+        def build_summary_view_sql(view_name: str, period_col: str, select_cols: str) -> str:
+            return summary_view_template.format(
+                view_name=view_name,
+                period_col=period_col,
+                select_cols=select_cols,
+                statuses=statuses,
+            )
+
+        weekly_report_view_sql = build_summary_view_sql(
+            "weekly_support_summary",
+            "calendar_week",
+            "wr.calendar_week AS week,\n                wr.reporting_month AS month,\n                wr.reporting_quarter AS quarter,",
+        )
+
+        monthly_report_view_sql = build_summary_view_sql(
+            "monthly_support_summary",
+            "reporting_month",
+            "wr.reporting_month AS month,\n                wr.reporting_quarter AS quarter,",
+        )
+
+        quarterly_report_view_sql = build_summary_view_sql(
+            "quarterly_support_summary",
+            "reporting_quarter",
+            "wr.reporting_quarter AS quarter,",
+        )
+
         with self.engine.begin() as conn:
             conn.execute(text("DROP VIEW IF EXISTS weekly_support_summary"))
+            conn.execute(text("DROP VIEW IF EXISTS monthly_support_summary"))
+            conn.execute(text("DROP VIEW IF EXISTS quarterly_support_summary"))
             conn.execute(text(weekly_report_view_sql))
+            conn.execute(text(monthly_report_view_sql))
+            conn.execute(text(quarterly_report_view_sql))
 
         inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
