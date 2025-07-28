@@ -56,6 +56,14 @@ STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME = {
     "PENDING",
 }
 
+# Statuses that are treated as closed for the "over 5 days no contact" KPI
+NO_CONTACT_IGNORE_STATUSES = {
+    "RESOLVED",
+    "CLOSED",
+    "PENDING",
+    "WAITING FOR CUSTOMER",
+}
+
 import requests
 import dateutil.parser
 import pytz
@@ -751,6 +759,133 @@ class SQLiteStore:
         with self.engine.begin() as conn:
             conn.execute(text("DROP VIEW IF EXISTS jira_tickets_worklogs"))
             conn.execute(text(ticket_worklogs_view_sql))
+
+        statuses = ",".join(f"'{s.lower()}'" for s in NO_CONTACT_IGNORE_STATUSES)
+
+        weekly_report_view_sql = f"""
+            CREATE VIEW IF NOT EXISTS weekly_support_summary AS
+            WITH
+                active AS (
+                    SELECT
+                        active_week AS week,
+                        COUNT(DISTINCT id) AS ongoing,
+                        COUNT(DISTINCT CASE WHEN request_type_category = 'SW' THEN id END) AS open_sw,
+                        COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS open_dis,
+                        COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS open_hw
+                    FROM jira_tickets_active_weeks
+                    WHERE COALESCE(status, '') != 'Cancelled'
+                    GROUP BY active_week
+                ),
+                friday AS (
+                    SELECT
+                        jc.cw AS week,
+                        COUNT(DISTINCT jc.ticket_id) AS overall_open,
+                        COUNT(DISTINCT CASE WHEN DATE(jt.created) <= DATE(jc.date, '-30 day') THEN jc.ticket_id END) AS aged_30,
+                        COUNT(DISTINCT CASE WHEN jt.assignee IS NULL OR jt.assignee = '' THEN jc.ticket_id END) AS unassigned,
+                        COUNT(DISTINCT CASE WHEN LOWER(jc.end_status) NOT IN ({statuses}) AND jc.weekdays_days_since_last_contact > 5 THEN jc.ticket_id END) AS over5_no_contact
+                    FROM jira_calendar jc
+                    JOIN jira_tickets jt ON jt.id = jc.ticket_id
+                    WHERE jc.weekday = 5
+                      AND LOWER(jc.end_status) NOT IN ('resolved','closed','cancelled')
+                      AND COALESCE(jt.status, '') != 'Cancelled'
+                      AND jc.is_junk != 1
+                    GROUP BY jc.cw
+                ),
+                highprio AS (
+                    SELECT jc.cw AS week, COUNT(DISTINCT jc.ticket_id) AS high_critical
+                    FROM jira_calendar jc
+                    JOIN jira_tickets jt ON jt.id = jc.ticket_id
+                    WHERE (jc.start_priority_pos >= 300 OR jc.end_priority_pos >= 300)
+                      AND COALESCE(jt.status, '') != 'Cancelled'
+                      AND jc.is_junk != 1
+                    GROUP BY jc.cw
+                ),
+                escalated AS (
+                    SELECT jc.cw AS week, COUNT(DISTINCT jc.ticket_id) AS escalated
+                    FROM jira_calendar jc
+                    JOIN jira_tickets jt ON jt.id = jc.ticket_id
+                    WHERE jc.did_escalate_priority = 1
+                      AND jc.end_priority_pos >= 300
+                      AND COALESCE(jt.status, '') != 'Cancelled'
+                      AND jc.is_junk != 1
+                    GROUP BY jc.cw
+                ),
+                newt AS (
+                    SELECT created_week AS week, COUNT(*) AS new_tickets
+                    FROM jira_tickets
+                    WHERE COALESCE(status, '') != 'Cancelled'
+                    GROUP BY created_week
+                ),
+                closed AS (
+                    SELECT
+                        resolved_week AS week,
+                        COUNT(*) AS closed_tickets,
+                        COUNT(DISTINCT CASE WHEN request_type_category = 'SW' THEN id END) AS closed_sw,
+                        COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS closed_dis,
+                        COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS closed_hw,
+                        AVG(resolution_time_days) AS avg_resolution_days,
+                        AVG((CAST(satisfaction AS REAL) - 1.0) / 4.0) AS csat_score,
+                        COUNT(satisfaction) AS csat_answers
+                    FROM jira_tickets_reporting
+                    WHERE resolved_week IS NOT NULL
+                      AND COALESCE(status, '') != 'Cancelled'
+                    GROUP BY resolved_week
+                ),
+                median_fr AS (
+                    SELECT week, AVG(first_response_time_minutes) AS median_first_reply
+                    FROM (
+                        SELECT
+                            first_response_date_week AS week,
+                            first_response_time_minutes,
+                            ROW_NUMBER() OVER (PARTITION BY first_response_date_week ORDER BY first_response_time_minutes) AS rn,
+                            COUNT(*) OVER (PARTITION BY first_response_date_week) AS cnt
+                        FROM jira_tickets
+                        WHERE first_response_time_minutes IS NOT NULL
+                          AND COALESCE(status, '') != 'Cancelled'
+                    ) t
+                    WHERE rn IN ((cnt + 1)/2, (cnt + 2)/2)
+                    GROUP BY week
+                )
+            SELECT
+                wr.calendar_week AS week,
+                wr.reporting_month AS month,
+                wr.reporting_quarter AS quarter,
+                COALESCE(active.ongoing, 0) AS ongoing_tickets,
+                COALESCE(friday.overall_open, 0) AS fri_open_tickets,
+                COALESCE(highprio.high_critical, 0) AS high_or_critical_tickets,
+                COALESCE(escalated.escalated, 0) AS escalated_tickets,
+                COALESCE(newt.new_tickets, 0) AS new_tickets,
+                COALESCE(closed.closed_tickets, 0) AS closed_tickets,
+                median_fr.median_first_reply AS median_first_reply_minutes,
+                closed.avg_resolution_days AS avg_resolution_days,
+                CASE WHEN newt.new_tickets IS NULL OR newt.new_tickets = 0 THEN NULL
+                     ELSE ROUND(100.0 * closed.closed_tickets / newt.new_tickets, 2)
+                END AS close_rate_percent,
+                closed.csat_score AS csat_score,
+                COALESCE(closed.csat_answers, 0) AS csat_answers,
+                COALESCE(active.open_sw, 0) AS open_sw,
+                COALESCE(active.open_dis, 0) AS open_dis,
+                COALESCE(active.open_hw, 0) AS open_hw,
+                COALESCE(closed.closed_sw, 0) AS closed_sw,
+                COALESCE(closed.closed_dis, 0) AS closed_dis,
+                COALESCE(closed.closed_hw, 0) AS closed_hw,
+                COALESCE(friday.aged_30, 0) AS aged_30_plus,
+                COALESCE(friday.overall_open, 0) AS overall_open,
+                COALESCE(friday.unassigned, 0) AS unassigned,
+                COALESCE(friday.over5_no_contact, 0) AS over5_days_no_contact
+            FROM week_reporting wr
+            LEFT JOIN active ON active.week = wr.calendar_week
+            LEFT JOIN friday ON friday.week = wr.calendar_week
+            LEFT JOIN highprio ON highprio.week = wr.calendar_week
+            LEFT JOIN escalated ON escalated.week = wr.calendar_week
+            LEFT JOIN newt ON newt.week = wr.calendar_week
+            LEFT JOIN closed ON closed.week = wr.calendar_week
+            LEFT JOIN median_fr ON median_fr.week = wr.calendar_week
+            ORDER BY wr.calendar_week
+        """
+        with self.engine.begin() as conn:
+            conn.execute(text("DROP VIEW IF EXISTS weekly_support_summary"))
+            conn.execute(text(weekly_report_view_sql))
 
         inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
