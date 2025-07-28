@@ -6,3 +6,4 @@
 config_*.json
 *.sqlite
 *.log
+/resource/
