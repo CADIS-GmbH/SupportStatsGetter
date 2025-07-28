@@ -203,7 +203,7 @@ def active_weeks(start: datetime.datetime | None, end: datetime.datetime | None)
     d = start
     while d <= end:
         weeks.add(cw_string_from_datetime(d))
-        d += datetime.timedelta(minutes=1)
+        d += datetime.timedelta(days=7)
     weeks.add(cw_string_from_datetime(end))
     return ",".join(sorted(weeks))
 
@@ -1340,7 +1340,7 @@ class SupportStatsGetter:
         if extra:
             parts.append(f"({extra})")
         if updated_since:
-            get_since = updated_since - datetime.timedelta(days=10)
+            get_since = updated_since - datetime.timedelta(days=7)
             ts = get_since.astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M")
             parts.append(f"updated >= \"{ts}\"")
         final_jql = " AND ".join(parts)
