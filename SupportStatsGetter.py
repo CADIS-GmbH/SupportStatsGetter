@@ -838,7 +838,12 @@ class SQLiteStore:
                         COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS closed_hw,
                         AVG(resolution_time_days) AS avg_resolution_days,
                         AVG((CAST(satisfaction AS REAL) - 1.0) / 4.0) AS csat_score,
-                        COUNT(satisfaction) AS csat_answers
+                        COUNT(satisfaction) AS csat_answers,
+                        COUNT(CASE WHEN satisfaction = '1' THEN 1 END) AS csat_1,
+                        COUNT(CASE WHEN satisfaction = '2' THEN 1 END) AS csat_2,
+                        COUNT(CASE WHEN satisfaction = '3' THEN 1 END) AS csat_3,
+                        COUNT(CASE WHEN satisfaction = '4' THEN 1 END) AS csat_4,
+                        COUNT(CASE WHEN satisfaction = '5' THEN 1 END) AS csat_5
                     FROM jira_tickets_reporting jtr
                     JOIN week_reporting wr ON wr.calendar_week = jtr.resolved_week
                     WHERE jtr.resolved_week IS NOT NULL
@@ -876,6 +881,11 @@ class SQLiteStore:
                 END AS close_rate_percent,
                 closed.csat_score AS csat_score,
                 COALESCE(closed.csat_answers, 0) AS csat_answers,
+                COALESCE(closed.csat_1, 0) AS csat_1,
+                COALESCE(closed.csat_2, 0) AS csat_2,
+                COALESCE(closed.csat_3, 0) AS csat_3,
+                COALESCE(closed.csat_4, 0) AS csat_4,
+                COALESCE(closed.csat_5, 0) AS csat_5,
                 COALESCE(active.open_sw, 0) AS open_sw,
                 COALESCE(active.open_dis, 0) AS open_dis,
                 COALESCE(active.open_hw, 0) AS open_hw,
