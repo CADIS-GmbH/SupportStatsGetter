@@ -175,7 +175,9 @@ class JiraCalendarRecord:
     cw: str = field(init=False)
     weekday: int = field(init=False)
     record_id: str = field(init=False)
-    date_modified: datetime.datetime = field(default_factory=lambda: datetime.datetime.utcnow())
+    date_modified: datetime.datetime = field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC)
+    )
 
     def __post_init__(self) -> None:
         if isinstance(self.date, datetime.datetime):
@@ -361,7 +363,11 @@ def make_jira_ticket_calendar(
     created = issue.get("created")
     if not created:
         return []
-    end_dt = issue.get("resolved") or issue.get("updated") or datetime.datetime.utcnow()
+    end_dt = (
+        issue.get("resolved")
+        or issue.get("updated")
+        or datetime.datetime.now(datetime.UTC)
+    )
 
     fields = issue.get("fields") or {}
     start_status = (fields.get("status") or {}).get("name", "Open")
