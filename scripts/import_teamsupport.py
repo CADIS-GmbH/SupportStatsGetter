@@ -1,0 +1,229 @@
+import argparse
+import json
+from pathlib import Path
+import datetime
+import pytz
+import dateutil.parser
+from sqlalchemy import create_engine
+
+from SupportStatsGetter import SQLiteStore, cw_string_from_datetime, primary_org_from_names
+from TeamSupportStatsGetter import CADIS_BDK_CONTACTS, SEVERITY_POS_MAP
+
+
+def parse_dt(val):
+    if not val:
+        return None
+    dt = dateutil.parser.isoparse(val)
+    if not dt.tzinfo:
+        dt = pytz.utc.localize(dt)
+    return dt
+
+
+def parse_bool(val):
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() == "true"
+
+
+def convert_cw(val):
+    if not val:
+        return None
+    if isinstance(val, list):
+        return ",".join(filter(None, (convert_cw(v) for v in val)))
+    return val.replace("_", ".")
+
+
+def extract_orgs(ticket):
+    names = []
+    pc = ticket.get("PrimaryCustomer")
+    if pc:
+        names.append(pc.strip())
+    customers = ticket.get("Customers", {}).get("Customer")
+    if isinstance(customers, list):
+        for c in customers:
+            name = c.get("CustomerName")
+            if name:
+                names.append(name)
+    elif isinstance(customers, dict):
+        name = customers.get("CustomerName")
+        if name:
+            names.append(name)
+    return names
+
+
+def map_ticket(t):
+    created = parse_dt(t.get("DateCreated"))
+    resolved = parse_dt(t.get("ResolvedDate"))
+    updated = parse_dt(t.get("DateModified"))
+    first_resp = parse_dt(t.get("FirstResponseDate"))
+    last_resp = parse_dt(t.get("LastResponseDate"))
+    orgs = extract_orgs(t)
+    return {
+        "id": str(t.get("ID")),
+        "key": str(t.get("TicketNumber")),
+        "summary": (t.get("TicketName") or t.get("Name") or "").strip(),
+        "status": t.get("Status"),
+        "assignee": t.get("UserName"),
+        "assignee_email": None,
+        "creator": t.get("CreatorName"),
+        "creator_email": None,
+        "labels": (t.get("GroupName") or "").strip(),
+        "priority": t.get("Severity"),
+        "priority_pos": int(SEVERITY_POS_MAP.get(t.get("Severity"), 0)),
+        "created": created,
+        "resolved": resolved,
+        "updated": updated,
+        "created_week": cw_string_from_datetime(created),
+        "resolved_week": cw_string_from_datetime(resolved),
+        "updated_week": cw_string_from_datetime(updated),
+        "active_weeks": convert_cw(t.get("ActiveWeeks")),
+        "first_response_date": first_resp,
+        "last_response_date": last_resp,
+        "first_response_date_week": cw_string_from_datetime(first_resp),
+        "last_response_date_week": cw_string_from_datetime(last_resp),
+        "first_response_time_minutes": int((first_resp - created).total_seconds() // 60) if created and first_resp else None,
+        "resolution_time_days": (resolved - created).total_seconds() / 86400 if created and resolved else None,
+        "request_type": t.get("TicketType"),
+        "deployment_type": None,
+        "organizations": ",".join(orgs),
+        "primary_organization": primary_org_from_names(orgs),
+        "resolution": t.get("Resolution"),
+        "satisfaction": None,
+        "satisfaction_ts": None,
+        "work_category": None,
+        "sentiment": None,
+    }
+
+
+def map_comment(act, ticket_id, ticket_nr):
+    return {
+        "id": str(act.get("ID")),
+        "ticket_id": ticket_id,
+        "issue_key": ticket_nr,
+        "author": act.get("CreatorName"),
+        "author_email": None,
+        "type": act.get("ActionType"),
+        "body": act.get("Description"),
+        "public": parse_bool(act.get("IsVisibleOnPortal")),
+        "internal_user": act.get("CreatorID") in CADIS_BDK_CONTACTS,
+        "created": parse_dt(act.get("DateCreated")),
+        "updated": parse_dt(act.get("DateModified")),
+    }
+
+
+def map_worklog(act, ticket_id):
+    if act.get("TimeSpent") is None:
+        return None
+    started = parse_dt(act.get("DateStarted"))
+    created = parse_dt(act.get("DateCreated"))
+    return {
+        "id": str(act.get("ID")),
+        "ticket_id": ticket_id,
+        "author": act.get("CreatorName"),
+        "author_email": None,
+        "time_spent_minutes": int(float(act.get("TimeSpent")) * 60),
+        "started": started,
+        "started_week": cw_string_from_datetime(started),
+        "text": act.get("Description"),
+        "created": created,
+        "created_week": cw_string_from_datetime(created),
+    }
+
+
+def map_history(hist, ticket_id):
+    return {
+        "id": f"{hist.get('ID')}-0",
+        "history_id": hist.get("ID"),
+        "ticket_id": ticket_id,
+        "author": hist.get("Actor"),
+        "author_email": None,
+        "created": parse_dt(hist.get("DateCreated")),
+        "field": "raw",
+        "fieldtype": None,
+        "from_value": None,
+        "from_string": None,
+        "to_value": None,
+        "to_string": hist.get("Description"),
+    }
+
+
+def map_calendar(cal):
+    dt = parse_dt(cal.get("date"))
+    modified = parse_dt(cal.get("DateModified"))
+    return {
+        "record_id": cal.get("ID"),
+        "ticket_id": cal.get("ticket_id"),
+        "ticket_key": cal.get("ticket_nr"),
+        "date": dt,
+        "comments": cal.get("actions"),
+        "public_comments": cal.get("public_actions"),
+        "start_assigned_group": cal.get("start_assigned_group"),
+        "end_assigned_group": cal.get("end_assigned_group"),
+        "start_assigned_user": cal.get("start_assigned_user"),
+        "end_assigned_user": cal.get("end_assigned_user"),
+        "start_assigned_user_email": None,
+        "end_assigned_user_email": None,
+        "did_escalate_priority": cal.get("did_escalate_severity"),
+        "did_escalate_cs": cal.get("did_escalate_cs"),
+        "did_escalate_management": cal.get("did_escalate_management"),
+        "start_priority_txt": cal.get("start_severity_txt"),
+        "start_priority_pos": cal.get("start_severity_pos"),
+        "end_priority_txt": cal.get("end_severity_txt"),
+        "end_priority_pos": cal.get("end_severity_pos"),
+        "time_spent_min": cal.get("time_spent_min"),
+        "start_status": cal.get("start_status"),
+        "end_status": cal.get("end_status"),
+        "did_resolve": cal.get("did_resolve"),
+        "total_days_open": cal.get("total_days_open"),
+        "weekdays_days_since_last_contact": cal.get("weekdays_days_since_last_contact"),
+        "adjusted_resolution_days": cal.get("adjusted_resolution_days"),
+        "adjusted_resolution_weekdays": cal.get("adjusted_resolution_weekdays"),
+        "is_junk": cal.get("is_junk"),
+        "cw": convert_cw(cal.get("cw")),
+        "weekday": cal.get("weekday"),
+        "date_modified": modified,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Import TeamSupport JSON data into the SQLite store")
+    parser.add_argument("--db", default="support_stats.sqlite", help="Path to SQLite DB")
+    parser.add_argument("--input", default=str(Path("resource/reduced_tickets.json")), help="Path to JSON file")
+    args = parser.parse_args()
+
+    with open(args.input, "r", encoding="utf-8") as f:
+        tickets = json.load(f)
+
+    store = SQLiteStore(create_engine(f"sqlite+pysqlite:///{args.db}"))
+
+    ticket_rows = []
+    comment_rows = []
+    worklog_rows = []
+    changelog_rows = []
+    calendar_rows = []
+
+    for t in tickets:
+        tid = str(t.get("ID"))
+        tkey = str(t.get("TicketNumber"))
+        ticket_rows.append(map_ticket(t))
+        for act in t.get("Actions", []):
+            comment_rows.append(map_comment(act, tid, tkey))
+            wl = map_worklog(act, tid)
+            if wl:
+                worklog_rows.append(wl)
+        for hist in t.get("History", []):
+            changelog_rows.append(map_history(hist, tid))
+        for cal in t.get("Calendar", []):
+            calendar_rows.append(map_calendar(cal))
+
+    store.insert_many(store.jira_tickets, ticket_rows)
+    store.insert_many(store.jira_comments, comment_rows)
+    store.insert_many(store.jira_worklogs, worklog_rows)
+    store.insert_many(store.jira_changelog, changelog_rows)
+    store.insert_many(store.jira_calendar, calendar_rows)
+
+
+if __name__ == "__main__":
+    main()
