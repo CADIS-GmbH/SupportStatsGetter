@@ -788,9 +788,9 @@ class SQLiteStore:
                     WHERE COALESCE(status, '') != 'Cancelled'
                     GROUP BY wr.{period_col}
                 ),
-                friday AS (
+                friday_week AS (
                     SELECT
-                        wr.{period_col} AS period,
+                        jc.cw AS cw,
                         COUNT(DISTINCT jc.ticket_id) AS overall_open,
                         COUNT(DISTINCT CASE WHEN DATE(jt.created) <= DATE(jc.date, '-5 day') THEN jc.ticket_id END) AS aged_5,
                         COUNT(DISTINCT CASE WHEN DATE(jt.created) <= DATE(jc.date, '-30 day') THEN jc.ticket_id END) AS aged_30,
@@ -798,11 +798,36 @@ class SQLiteStore:
                         COUNT(DISTINCT CASE WHEN LOWER(jc.end_status) NOT IN ({statuses}) AND jc.weekdays_days_since_last_contact > 5 THEN jc.ticket_id END) AS over5_no_contact
                     FROM jira_calendar jc
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
-                    JOIN week_reporting wr ON wr.calendar_week = jc.cw
                     WHERE jc.weekday = 5
                       AND LOWER(jc.end_status) NOT IN ('resolved','closed','cancelled')
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
+                    GROUP BY jc.cw
+                ),
+                friday AS (
+                    SELECT
+                        wr.{period_col} AS period,
+                        AVG(fw.overall_open) AS overall_open,
+                        (
+                            SELECT fw2.aged_30
+                            FROM friday_week fw2
+                            JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
+                            WHERE wr2.{period_col} = wr.{period_col}
+                            ORDER BY fw2.cw DESC
+                            LIMIT 1
+                        ) AS aged_30,
+                        (
+                            SELECT fw2.aged_5
+                            FROM friday_week fw2
+                            JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
+                            WHERE wr2.{period_col} = wr.{period_col}
+                            ORDER BY fw2.cw DESC
+                            LIMIT 1
+                        ) AS aged_5,
+                        AVG(fw.unassigned) AS unassigned,
+                        AVG(fw.over5_no_contact) AS over5_no_contact
+                    FROM friday_week fw
+                    JOIN week_reporting wr ON wr.calendar_week = fw.cw
                     GROUP BY wr.{period_col}
                 ),
                 highprio AS (
