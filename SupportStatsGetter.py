@@ -58,10 +58,11 @@ STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME = {
 
 # Statuses that are treated as closed for the "over 5 days no contact" KPI
 NO_CONTACT_IGNORE_STATUSES = {
+    "CLOSED",
     "RESOLVED",
+    "CANCELLED",
     "CLOSED",
     "PENDING",
-    "WAITING FOR CUSTOMER",
 }
 
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
