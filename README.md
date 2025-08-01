@@ -103,3 +103,7 @@ history entries to populate the `jira_changelog` table and mark comments or
 history rows created by internal users based on the IDs defined in
 `cadis_bdk_contacts.py`.
 
+Legacy ticket statuses are translated to the Jira status names using a built-in
+mapping. This ensures that metrics derived from imported data are consistent
+with records created directly in Jira.
+

@@ -26,6 +26,28 @@ SEVERITY_POS_MAP = {
     "Low": -100
 }
 
+# Map legacy TeamSupport statuses to the Jira equivalents. This ensures that
+# imported records use the same status vocabulary as tickets created in Jira
+# directly which is important for KPI calculations.
+TS_STATUS_MAP = {
+    "New": "Open",
+    "Waiting Internal": "Pending",
+    "Waiting on Customer": "Waiting for Customer",
+    "Closed": "Closed",
+    "Closed - Resolved": "Resolved",
+    "Spam/Junk Delete": "Cancelled",
+    "Customer Replied": "Open",
+    "In Progress": "In Progress",
+    "On Hold": "Pending",
+}
+
+
+def map_status(value):
+    """Translate a TeamSupport status to the Jira status vocabulary."""
+    if value is None:
+        return None
+    return TS_STATUS_MAP.get(str(value).strip(), str(value).strip())
+
 
 def severity_to_priority(txt):
     """Return priority text and numeric position for a severity value."""
@@ -98,7 +120,7 @@ def map_ticket(t):
         "id": str(t.get("ID")),
         "key": str(t.get("TicketNumber")),
         "summary": (t.get("TicketName") or t.get("Name") or "").strip(),
-        "status": t.get("Status"),
+        "status": map_status(t.get("Status")),
         "assignee": t.get("UserName"),
         "assignee_email": None,
         "creator": t.get("CreatorName"),
@@ -173,11 +195,11 @@ def map_history(hist, ticket_id):
     to_string = None
     if m := re.match(STATUS_CHANGE_RE, desc):
         field = "status"
-        from_string = m.group(1)
-        to_string = m.group(2)
+        from_string = map_status(m.group(1))
+        to_string = map_status(m.group(2))
     elif m := re.match(EMAIL_REPLY_RE, desc):
         field = "status"
-        to_string = m.group(1)
+        to_string = map_status(m.group(1))
     elif m := re.match(GROUP_ASSIGN_RE, desc):
         field = "group"
         from_string = m.group(1)
@@ -234,8 +256,8 @@ def map_calendar(cal):
         "end_priority_txt": cal.get("end_severity_txt"),
         "end_priority_pos": cal.get("end_severity_pos"),
         "time_spent_min": cal.get("time_spent_min"),
-        "start_status": cal.get("start_status"),
-        "end_status": cal.get("end_status"),
+        "start_status": map_status(cal.get("start_status")),
+        "end_status": map_status(cal.get("end_status")),
         "did_resolve": bool_from_string(cal.get("did_resolve")),
         "total_days_open": cal.get("total_days_open"),
         "weekdays_days_since_last_contact": cal.get("weekdays_days_since_last_contact"),
