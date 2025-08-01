@@ -11,13 +11,20 @@ import re
 from SupportStatsGetter import SQLiteStore, cw_string_from_datetime, primary_org_from_names
 from cadis_bdk_contacts import CADIS_BDK_CONTACTS
 from TeamSupportStatsGetter import (
-    SEVERITY_POS_MAP,
     STATUS_CHANGE_RE,
     GROUP_ASSIGN_RE,
     USER_ASSIGN_RE,
     SEVERITY_CHANGE_RE,
     EMAIL_REPLY_RE,
 )
+
+SEVERITY_POS_MAP = {
+    "Normal": 0,
+    "High": 100,
+    "Critical": 200,
+    "Medium": 0,
+    "Low": -100
+}
 
 
 def severity_to_priority(txt):

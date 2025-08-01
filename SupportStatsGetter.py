@@ -29,10 +29,10 @@ ORG_PATTERNS: list[tuple[Pattern[str], str, int]] = []
 
 # Mapping of priority names to numeric positions
 PRIORITY_POS_MAP = {
-    "C": 100,
-    "B": 200,
-    "A": 300,
-    "AA": 400,
+    "C": -100,
+    "B": 0,
+    "A": 100,
+    "AA": 200,
     "Offen": 0,
     "Open": 0
 }
