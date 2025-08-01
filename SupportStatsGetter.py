@@ -1673,10 +1673,19 @@ class SupportStatsGetter:
         return val
 
     @staticmethod
-    def _parse_ts(value: str | None) -> datetime.datetime | None:
-        if not value:
+    def _parse_ts(value: str | datetime.datetime | None) -> datetime.datetime | None:
+        """Return a timezone-aware datetime for *value*.
+
+        The input may already be a datetime instance or a string. In either
+        case the result is converted to an aware UTC datetime. ``None`` values
+        are returned unchanged.
+        """
+        if value is None:
             return None
-        ts = dateutil.parser.isoparse(value)
+        if isinstance(value, datetime.datetime):
+            ts = value
+        else:
+            ts = dateutil.parser.isoparse(str(value))
         return ts if ts.tzinfo else pytz.utc.localize(ts)
 
 
