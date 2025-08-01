@@ -10,6 +10,29 @@ from SupportStatsGetter import SQLiteStore, cw_string_from_datetime, primary_org
 from TeamSupportStatsGetter import CADIS_BDK_CONTACTS, SEVERITY_POS_MAP
 
 
+def severity_to_priority(txt):
+    """Return priority text and numeric position for a severity value."""
+    if txt is None:
+        return None, 0
+    return txt, int(SEVERITY_POS_MAP.get(txt, 0))
+
+
+def week_underscore_to_dot(week_str):
+    """Convert ``YYYY_WW`` strings from TeamSupport to ``YYYY.WW``."""
+    if week_str is None:
+        return None
+    return str(week_str).replace("_", ".")
+
+
+def bool_from_string(val):
+    """Return boolean value parsed from ``"True"``/``"False"`` strings."""
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() == "true"
+
+
 def parse_dt(val):
     if not val:
         return None
@@ -19,20 +42,12 @@ def parse_dt(val):
     return dt
 
 
-def parse_bool(val):
-    if val is None:
-        return None
-    if isinstance(val, bool):
-        return val
-    return str(val).strip().lower() == "true"
-
-
 def convert_cw(val):
     if not val:
         return None
     if isinstance(val, list):
         return ",".join(filter(None, (convert_cw(v) for v in val)))
-    return val.replace("_", ".")
+    return week_underscore_to_dot(val)
 
 
 def extract_orgs(ticket):
@@ -60,6 +75,7 @@ def map_ticket(t):
     first_resp = parse_dt(t.get("FirstResponseDate"))
     last_resp = parse_dt(t.get("LastResponseDate"))
     orgs = extract_orgs(t)
+    priority_txt, priority_pos = severity_to_priority(t.get("Severity"))
     return {
         "id": str(t.get("ID")),
         "key": str(t.get("TicketNumber")),
@@ -70,8 +86,8 @@ def map_ticket(t):
         "creator": t.get("CreatorName"),
         "creator_email": None,
         "labels": (t.get("GroupName") or "").strip(),
-        "priority": t.get("Severity"),
-        "priority_pos": int(SEVERITY_POS_MAP.get(t.get("Severity"), 0)),
+        "priority": priority_txt,
+        "priority_pos": priority_pos,
         "created": created,
         "resolved": resolved,
         "updated": updated,
@@ -106,7 +122,7 @@ def map_comment(act, ticket_id, ticket_nr):
         "author_email": None,
         "type": act.get("ActionType"),
         "body": act.get("Description"),
-        "public": parse_bool(act.get("IsVisibleOnPortal")),
+        "public": bool_from_string(act.get("IsVisibleOnPortal")),
         "internal_user": act.get("CreatorID") in CADIS_BDK_CONTACTS,
         "created": parse_dt(act.get("DateCreated")),
         "updated": parse_dt(act.get("DateModified")),
@@ -165,9 +181,9 @@ def map_calendar(cal):
         "end_assigned_user": cal.get("end_assigned_user"),
         "start_assigned_user_email": None,
         "end_assigned_user_email": None,
-        "did_escalate_priority": cal.get("did_escalate_severity"),
-        "did_escalate_cs": cal.get("did_escalate_cs"),
-        "did_escalate_management": cal.get("did_escalate_management"),
+        "did_escalate_priority": bool_from_string(cal.get("did_escalate_severity")),
+        "did_escalate_cs": bool_from_string(cal.get("did_escalate_cs")),
+        "did_escalate_management": bool_from_string(cal.get("did_escalate_management")),
         "start_priority_txt": cal.get("start_severity_txt"),
         "start_priority_pos": cal.get("start_severity_pos"),
         "end_priority_txt": cal.get("end_severity_txt"),
@@ -175,12 +191,12 @@ def map_calendar(cal):
         "time_spent_min": cal.get("time_spent_min"),
         "start_status": cal.get("start_status"),
         "end_status": cal.get("end_status"),
-        "did_resolve": cal.get("did_resolve"),
+        "did_resolve": bool_from_string(cal.get("did_resolve")),
         "total_days_open": cal.get("total_days_open"),
         "weekdays_days_since_last_contact": cal.get("weekdays_days_since_last_contact"),
         "adjusted_resolution_days": cal.get("adjusted_resolution_days"),
         "adjusted_resolution_weekdays": cal.get("adjusted_resolution_weekdays"),
-        "is_junk": cal.get("is_junk"),
+        "is_junk": bool_from_string(cal.get("is_junk")),
         "cw": convert_cw(cal.get("cw")),
         "weekday": cal.get("weekday"),
         "date_modified": modified,
