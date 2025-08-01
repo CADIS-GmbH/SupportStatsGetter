@@ -35,13 +35,13 @@ SEVERITY_POS_MAP = {
 # imported records use the same status vocabulary as tickets created in Jira
 # directly which is important for KPI calculations.
 TS_STATUS_MAP = {
-    "New": "Open",
-    "Waiting Internal": "Pending",
+    "New": "Waiting for Support",
+    "Waiting Internal": "Escalated",
     "Waiting on Customer": "Waiting for Customer",
     "Closed": "Closed",
     "Closed - Resolved": "Resolved",
     "Spam/Junk Delete": "Cancelled",
-    "Customer Replied": "Open",
+    "Customer Replied": "Waiting for Support",
     "In Progress": "In Progress",
     "On Hold": "Pending",
 }
