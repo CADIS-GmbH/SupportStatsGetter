@@ -9,8 +9,8 @@ from sqlalchemy import create_engine
 import re
 
 from SupportStatsGetter import SQLiteStore, cw_string_from_datetime, primary_org_from_names
+from cadis_bdk_contacts import CADIS_BDK_CONTACTS
 from TeamSupportStatsGetter import (
-    CADIS_BDK_CONTACTS,
     SEVERITY_POS_MAP,
     STATUS_CHANGE_RE,
     GROUP_ASSIGN_RE,
@@ -191,6 +191,7 @@ def map_history(hist, ticket_id):
         "ticket_id": ticket_id,
         "author": hist.get("Actor"),
         "author_email": None,
+        "internal_user": hist.get("CreatorID") in CADIS_BDK_CONTACTS,
         "created": parse_dt(hist.get("DateCreated")),
         "field": field,
         "fieldtype": None,
