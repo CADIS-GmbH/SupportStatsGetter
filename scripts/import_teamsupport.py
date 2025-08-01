@@ -8,7 +8,12 @@ from sqlalchemy import create_engine
 
 import re
 
-from SupportStatsGetter import SQLiteStore, cw_string_from_datetime, primary_org_from_names
+from SupportStatsGetter import (
+    SQLiteStore,
+    cw_string_from_datetime,
+    primary_org_from_names,
+    ORG_PATTERNS,
+)
 from cadis_bdk_contacts import CADIS_BDK_CONTACTS
 from TeamSupportStatsGetter import (
     STATUS_CHANGE_RE,
@@ -280,6 +285,8 @@ def main():
         tickets = json.load(f)
 
     store = SQLiteStore(create_engine(f"sqlite+pysqlite:///{args.db}"))
+    global ORG_PATTERNS
+    ORG_PATTERNS = store.load_org_patterns()
 
     ticket_rows = []
     comment_rows = []
