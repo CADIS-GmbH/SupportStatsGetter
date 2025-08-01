@@ -24,6 +24,7 @@ def severity_to_priority(txt):
     """Return priority text and numeric position for a severity value."""
     if txt is None:
         return None, 0
+    txt = str(txt).strip()
     return txt, int(SEVERITY_POS_MAP.get(txt, 0))
 
 
@@ -133,7 +134,7 @@ def map_comment(act, ticket_id, ticket_nr):
         "type": act.get("ActionType"),
         "body": act.get("Description"),
         "public": bool_from_string(act.get("IsVisibleOnPortal")),
-        "internal_user": act.get("CreatorID") in CADIS_BDK_CONTACTS,
+        "internal_user": str(act.get("CreatorID")) in CADIS_BDK_CONTACTS,
         "created": parse_dt(act.get("DateCreated")),
         "updated": parse_dt(act.get("DateModified")),
     }
@@ -149,7 +150,7 @@ def map_worklog(act, ticket_id):
         "ticket_id": ticket_id,
         "author": act.get("CreatorName"),
         "author_email": None,
-        "time_spent_minutes": int(float(act.get("TimeSpent")) * 60),
+        "time_spent_minutes": int(float(act.get("TimeSpent"))),
         "started": started,
         "started_week": cw_string_from_datetime(started),
         "text": act.get("Description"),
@@ -191,7 +192,7 @@ def map_history(hist, ticket_id):
         "ticket_id": ticket_id,
         "author": hist.get("Actor"),
         "author_email": None,
-        "internal_user": hist.get("CreatorID") in CADIS_BDK_CONTACTS,
+        "internal_user": str(hist.get("CreatorID")) in CADIS_BDK_CONTACTS,
         "created": parse_dt(hist.get("DateCreated")),
         "field": field,
         "fieldtype": None,

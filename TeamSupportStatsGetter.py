@@ -427,7 +427,7 @@ def __reformat_record(r):
     r = r | add_dict_values
 
     if "CreatorID" in r:
-        r["internal_user"] = r.get("CreatorID") in CADIS_BDK_CONTACTS
+        r["internal_user"] = str(r.get("CreatorID")) in CADIS_BDK_CONTACTS
     else:
         r["internal_user"] = False
 
@@ -456,7 +456,7 @@ def __extract_first_response_date(actions: list):
         # action must be public (isVisible...) and be performed by and internal contact (in CADIS_BDK_CONTACTS) and
         # must not be the very first (i.e. create) action (k>0)
         if ((i["IsVisibleOnPortal"] == "True") >= 0) \
-                and (i["CreatorID"] in CADIS_BDK_CONTACTS) \
+                and (str(i.get("CreatorID")) in CADIS_BDK_CONTACTS) \
                 and k > 0:
             return i["DateCreated"]
         k += 1
@@ -475,7 +475,7 @@ def __extract_last_response_date(actions: list):
         # action must be public (isVisible...) and be performed by and internal contact (in CADIS_BDK_CONTACTS) and
         # must not be the very first (i.e. create) action (idx>0)
         if ((i["IsVisibleOnPortal"] == "True") >= 0) \
-                and (i["CreatorID"] in CADIS_BDK_CONTACTS) \
+                and (str(i.get("CreatorID")) in CADIS_BDK_CONTACTS) \
                 and idx > 0:
             return i["DateCreated"]
         idx -= 1
@@ -540,7 +540,21 @@ def make_ticket_calendar(t):
 
     calendar = []
     c_date = s_date_str
-    sdr = StatisticsDayRecord(ticket_id=t["ID"], ticket_nr=t["TicketNumber"], date=c_date)
+    sdr = StatisticsDayRecord(
+        ticket_id=t["ID"],
+        ticket_nr=t["TicketNumber"],
+        date=c_date,
+        start_assigned_group=(t.get("GroupName") or "Unassigned").strip() or "Unassigned",
+        end_assigned_group=(t.get("GroupName") or "Unassigned").strip() or "Unassigned",
+        start_assigned_user=(t.get("UserName") or "Unassigned").strip() or "Unassigned",
+        end_assigned_user=(t.get("UserName") or "Unassigned").strip() or "Unassigned",
+        start_status=t.get("Status") or "New",
+        end_status=t.get("Status") or "New",
+        start_severity_txt=t.get("Severity") or "Normal",
+        end_severity_txt=t.get("Severity") or "Normal",
+        start_severity_pos=int(SEVERITY_POS_MAP.get(t.get("Severity"), 0)),
+        end_severity_pos=int(SEVERITY_POS_MAP.get(t.get("Severity"), 0)),
+    )
 
     while c_date <= e_date_str:
         for e in history_by_date.get(c_date, []):
