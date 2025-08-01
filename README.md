@@ -86,3 +86,20 @@ Daily statistics for each ticket are stored in the `jira_calendar` table. Column
 - `start_status` / `end_status` - status at the start and end of the day
 - `time_spent_min` - minutes logged via worklogs for the day
 - `cw` / `weekday` - calendar week and ISO weekday
+
+## Importing legacy TeamSupport data
+
+Historic exports from the former TeamSupport system can be loaded into the same
+SQLite database used for Jira data. The repository provides a dedicated helper
+script for this purpose:
+
+```bash
+python scripts/import_teamsupport.py --db-path path/to/db.sqlite --input resource/reduced_tickets.json
+```
+
+The importer reads the provided JSON file and inserts tickets, comments,
+worklogs, changelog entries and calendar rows. It can also parse the legacy
+history entries to populate the `jira_changelog` table and mark comments or
+history rows created by internal users based on the IDs defined in
+`cadis_bdk_contacts.py`.
+
