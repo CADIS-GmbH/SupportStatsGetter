@@ -1254,19 +1254,38 @@ class SupportStatsGetter:
 
     @log_call
     def recalculate_all(self) -> None:
-        """Recalculate KPI fields and calendar for all stored tickets."""
+        """Recalculate KPI and mapped fields for all stored tickets."""
         with self.store.engine.connect() as conn:
             tickets = conn.execute(select(self.store.jira_tickets.c.id)).fetchall()
+
         for (ticket_id,) in tickets:
-            issue_row, comments, worklogs, changelog = self.store.get_ticket_with_related(ticket_id)
+            issue_row, comments, worklogs, changelog = self.store.get_ticket_with_related(
+                ticket_id
+            )
             if not issue_row:
                 continue
+
+            # Recalculate internal user flag for all comments
+            updated_comments: list[dict[str, Any]] = []
+            for c in comments:
+                author = {
+                    "displayName": c.get("author"),
+                    "emailAddress": c.get("author_email"),
+                }
+                updated = dict(c)
+                updated["internal_user"] = is_internal_user(author)
+                updated_comments.append(updated)
+            self.store.insert_many(self.store.jira_comments, updated_comments)
+
             fields = {
                 "summary": issue_row.get("summary"),
                 "status": {"name": issue_row.get("status")},
             }
             if issue_row.get("assignee"):
-                fields["assignee"] = {"displayName": issue_row.get("assignee")}
+                fields["assignee"] = {
+                    "displayName": issue_row.get("assignee"),
+                    "emailAddress": issue_row.get("assignee_email"),
+                }
             if issue_row.get("labels"):
                 fields["labels"] = [l for l in issue_row.get("labels", "").split(",") if l]
             if issue_row.get("priority"):
@@ -1276,17 +1295,20 @@ class SupportStatsGetter:
             if issue_row.get("deployment_type"):
                 fields["Deployment type"] = issue_row.get("deployment_type")
             if issue_row.get("organizations"):
-                fields["Organizations"] = [o for o in issue_row.get("organizations", "").split(",") if o]
-        if issue_row.get("resolution"):
-            fields["resolution"] = {"name": issue_row.get("resolution")}
-        if issue_row.get("satisfaction"):
-            fields["satisfaction"] = issue_row.get("satisfaction")
-        if issue_row.get("satisfaction_ts"):
-            fields["satisfaction_ts"] = issue_row.get("satisfaction_ts")
-        if issue_row.get("work_category"):
-            fields["work category"] = issue_row.get("work_category")
+                fields["Organizations"] = [
+                    o for o in issue_row.get("organizations", "").split(",") if o
+                ]
+            if issue_row.get("resolution"):
+                fields["resolution"] = {"name": issue_row.get("resolution")}
+            if issue_row.get("satisfaction"):
+                fields["satisfaction"] = issue_row.get("satisfaction")
+            if issue_row.get("satisfaction_ts"):
+                fields["satisfaction_ts"] = issue_row.get("satisfaction_ts")
+            if issue_row.get("work_category"):
+                fields["work category"] = issue_row.get("work_category")
             if issue_row.get("sentiment"):
                 fields["sentiment"] = issue_row.get("sentiment")
+
             issue = {
                 "id": issue_row["id"],
                 "key": issue_row.get("key"),
@@ -1295,11 +1317,17 @@ class SupportStatsGetter:
                 "updated": issue_row.get("updated"),
                 "fields": fields,
             }
-            processed_issue = calculate_kpi_fields(issue, comments, changelog)
+            processed_issue = calculate_kpi_fields(issue, updated_comments, changelog)
             self.store_jira_tickets([processed_issue])
-            calendar_rows = make_jira_ticket_calendar(processed_issue, comments, worklogs, changelog)
+            calendar_rows = make_jira_ticket_calendar(
+                processed_issue, updated_comments, worklogs, changelog
+            )
             with self.store.engine.begin() as conn:
-                conn.execute(delete(self.store.jira_calendar).where(self.store.jira_calendar.c.ticket_id == ticket_id))
+                conn.execute(
+                    delete(self.store.jira_calendar).where(
+                        self.store.jira_calendar.c.ticket_id == ticket_id
+                    )
+                )
             self.store.insert_many(self.store.jira_calendar, calendar_rows)
 
     @log_call
@@ -1645,10 +1673,19 @@ class SupportStatsGetter:
         return val
 
     @staticmethod
-    def _parse_ts(value: str | None) -> datetime.datetime | None:
-        if not value:
+    def _parse_ts(value: str | datetime.datetime | None) -> datetime.datetime | None:
+        """Return a timezone-aware datetime for *value*.
+
+        The input may already be a datetime instance or a string. In either
+        case the result is converted to an aware UTC datetime. ``None`` values
+        are returned unchanged.
+        """
+        if value is None:
             return None
-        ts = dateutil.parser.isoparse(value)
+        if isinstance(value, datetime.datetime):
+            ts = value
+        else:
+            ts = dateutil.parser.isoparse(str(value))
         return ts if ts.tzinfo else pytz.utc.localize(ts)
 
 
