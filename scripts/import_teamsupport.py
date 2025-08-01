@@ -6,8 +6,18 @@ import pytz
 import dateutil.parser
 from sqlalchemy import create_engine
 
+import re
+
 from SupportStatsGetter import SQLiteStore, cw_string_from_datetime, primary_org_from_names
-from TeamSupportStatsGetter import CADIS_BDK_CONTACTS, SEVERITY_POS_MAP
+from TeamSupportStatsGetter import (
+    CADIS_BDK_CONTACTS,
+    SEVERITY_POS_MAP,
+    STATUS_CHANGE_RE,
+    GROUP_ASSIGN_RE,
+    USER_ASSIGN_RE,
+    SEVERITY_CHANGE_RE,
+    EMAIL_REPLY_RE,
+)
 
 
 def severity_to_priority(txt):
@@ -149,6 +159,32 @@ def map_worklog(act, ticket_id):
 
 
 def map_history(hist, ticket_id):
+    desc = hist.get("Description") or ""
+    field = "Legacy"
+    from_string = None
+    to_string = None
+    if m := re.match(STATUS_CHANGE_RE, desc):
+        field = "status"
+        from_string = m.group(1)
+        to_string = m.group(2)
+    elif m := re.match(EMAIL_REPLY_RE, desc):
+        field = "status"
+        to_string = m.group(1)
+    elif m := re.match(GROUP_ASSIGN_RE, desc):
+        field = "group"
+        from_string = m.group(1)
+        to_string = m.group(2)
+    elif m := re.match(USER_ASSIGN_RE, desc):
+        field = "assignee"
+        from_string = m.group(1)
+        to_string = m.group(2)
+    elif m := re.match(SEVERITY_CHANGE_RE, desc):
+        field = "severity"
+        from_string = m.group(1)
+        to_string = m.group(2)
+    else:
+        to_string = desc
+
     return {
         "id": f"{hist.get('ID')}-0",
         "history_id": hist.get("ID"),
@@ -156,12 +192,12 @@ def map_history(hist, ticket_id):
         "author": hist.get("Actor"),
         "author_email": None,
         "created": parse_dt(hist.get("DateCreated")),
-        "field": "raw",
+        "field": field,
         "fieldtype": None,
         "from_value": None,
-        "from_string": None,
+        "from_string": from_string,
         "to_value": None,
-        "to_string": hist.get("Description"),
+        "to_string": to_string,
     }
 
 
