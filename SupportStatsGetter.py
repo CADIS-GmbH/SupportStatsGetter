@@ -2,7 +2,7 @@
 ====================
 
 Tool for collecting ticket statistics from **Jira Service Management**.
-The data is stored in a normalized SQLite database. The code is based on
+The data is stored in a normalized Access database by default. Pass ``--sqlite`` on the command line to use a SQLite database instead. The code is based on
 ``TeamSupportStatsGetter.py`` but no longer supports TeamSupport.
 """
 
@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Pattern, Mapping
 import re
+import urllib.parse
 
 # Email patterns of internal agents used to detect response times. The patterns
 # are loaded from the ``internal_users`` table at runtime.
@@ -118,7 +119,7 @@ def setup_logging(level: str, log_file: Path) -> None:
 class Config:
     """Runtime configuration values."""
 
-    db_path: Path = Path("support_stats.sqlite")
+    db_path: Path = Path("support_stats.accdb")
     jira_base_url: str | None = None
     jira_user: str | None = None
     jira_token: str | None = None
@@ -133,7 +134,7 @@ class Config:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return Config(
-            db_path=Path(data.get("db_path", "support_stats.sqlite")),
+            db_path=Path(data.get("db_path", "support_stats.accdb")),
             jira_base_url=data.get("jira_base_url"),
             jira_user=data.get("jira_user"),
             jira_token=data.get("jira_token"),
@@ -544,11 +545,16 @@ def make_jira_ticket_calendar(
 
 
 class SQLiteStore:
-    """Simple wrapper around an SQLite database using SQLAlchemy."""
+    """Simple wrapper around a database using SQLAlchemy."""
 
     @log_call
     def __init__(self, engine: Engine | None = None):
-        self.engine = engine or create_engine("sqlite+pysqlite:///support_stats.sqlite")
+        self.engine = engine or create_engine(
+            "access+pyodbc:///?odbc_connect="
+            + urllib.parse.quote_plus(
+                "DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=support_stats.accdb"
+            )
+        )
         self.meta = MetaData()
         self._prepare_schema()
 
@@ -1264,12 +1270,19 @@ class SQLiteStore:
 
 
 class SupportStatsGetter:
-    """Retrieve Jira ticket data and store it in SQLite."""
+    """Retrieve Jira ticket data and store it in the configured database."""
 
     @log_call
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, use_sqlite: bool = False):
         self.config = config
-        self.store = SQLiteStore(create_engine(f"sqlite+pysqlite:///{config.db_path}"))
+        if use_sqlite:
+            engine = create_engine(f"sqlite+pysqlite:///{config.db_path}")
+        else:
+            conn = urllib.parse.quote_plus(
+                f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={config.db_path}"
+            )
+            engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
+        self.store = SQLiteStore(engine)
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
         global ORG_PATTERNS
@@ -1750,6 +1763,11 @@ if __name__ == "__main__":
         help="Logging level (overrides config)",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     )
+    parser.add_argument(
+        "--sqlite",
+        action="store_true",
+        help="Use SQLite database instead of Access",
+    )
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -1762,7 +1780,7 @@ if __name__ == "__main__":
     log_level = args.log_level or cfg.log_level
     setup_logging(log_level, cfg.log_file)
 
-    getter = SupportStatsGetter(cfg)
+    getter = SupportStatsGetter(cfg, use_sqlite=args.sqlite)
     if cfg.jira_base_url:
         try:
             since = getter.latest_update_timestamp()
