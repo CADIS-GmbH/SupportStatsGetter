@@ -29,7 +29,7 @@ GROUP_ASSIGN_RE = "Reassigned.*from group (?:&apos;|')(.*)(?:&apos;|') to group 
 USER_ASSIGN_RE = "Reassigned.*from user (?:&apos;|')(.*)(?:&apos;|') to user (?:&apos;|')(.*)(?:&apos;|')"
 SEVERITY_CHANGE_RE = "Changed severity from (?:&apos;|')(.*)(?:&apos;|') to (?:&apos;|')(.*)(?:&apos;|')"
 EMAIL_REPLY_RE = 'Changed status of ticket to (?:&quot;|")(.*)(?:&quot;|") since ticket was replied to via e-mail'
-EXCLUDE_BY_NAME_RES = ['\[RECOVERY\]']
+EXCLUDE_BY_NAME_RES = [r"\[RECOVERY\]"]
 
 KEEP_RAW_ACTION_TEXT = False # if true the text is kept in its raw state (MAX_ACTION_TEXT_LEN is ignored)
 GET_ATTACHEMNTS = False # download and save files
