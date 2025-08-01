@@ -374,13 +374,61 @@ def make_jira_ticket_calendar(
     )
 
     fields = issue.get("fields") or {}
-    start_status = (fields.get("status") or {}).get("name", "Open")
-    assigned_user = (fields.get("assignee") or {}).get("displayName")
-    assigned_user_email = (fields.get("assignee") or {}).get("emailAddress")
-    labels = fields.get("labels") or []
-    assigned_group = group_from_labels(labels)
-    priority_txt = (fields.get("priority") or {}).get("name") or ""
-    priority_pos = PRIORITY_POS_MAP.get(priority_txt, 0)
+
+    def derive_initial_state() -> tuple[
+        str,
+        str | None,
+        str | None,
+        list[str],
+        str,
+        str,
+        int,
+    ]:
+        """Reconstruct field values at ticket creation from the changelog."""
+
+        status = (fields.get("status") or {}).get("name", "Open")
+        user = (fields.get("assignee") or {}).get("displayName")
+        user_email = (fields.get("assignee") or {}).get("emailAddress")
+        lbls: list[str] = list(fields.get("labels") or [])
+        priority = (fields.get("priority") or {}).get("name") or ""
+        prio_pos = PRIORITY_POS_MAP.get(priority, 0)
+
+        histories = sorted(
+            changelog, key=lambda h: h.get("created") or datetime.datetime.min, reverse=True
+        )
+        for hist in histories:
+            for item in hist.get("items", []):
+                field = (item.get("field") or "").lower()
+                prev_val = item.get("fromString")
+                if prev_val is None:
+                    prev_val = item.get("from")
+                if prev_val is None:
+                    continue
+                if field == "status":
+                    status = str(prev_val)
+                elif field == "assignee":
+                    user = str(prev_val)
+                    user_email = None
+                elif field == "labels":
+                    if isinstance(prev_val, list):
+                        lbls = [str(l) for l in prev_val]
+                    else:
+                        lbls = [l.strip() for l in str(prev_val).split(",") if l.strip()]
+                elif field == "priority":
+                    priority = str(prev_val)
+                    prio_pos = PRIORITY_POS_MAP.get(priority, 0)
+
+        return status, user, user_email, lbls, group_from_labels(lbls), priority, prio_pos
+
+    (
+        start_status,
+        assigned_user,
+        assigned_user_email,
+        labels,
+        assigned_group,
+        priority_txt,
+        priority_pos,
+    ) = derive_initial_state()
 
     adjusted_days = 0
     adjusted_weekdays = 0
