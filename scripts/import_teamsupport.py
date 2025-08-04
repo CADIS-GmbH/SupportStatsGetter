@@ -148,7 +148,7 @@ def map_ticket(t):
         "last_response_date_week": cw_string_from_datetime(last_resp),
         "first_response_time_minutes": int((first_resp - created).total_seconds() // 60) if created and first_resp else None,
         "resolution_time_days": (resolved - created).total_seconds() / 86400 if created and resolved else None,
-        "request_type": t.get("TicketType"),
+        "request_type": t.get("ProductName"),
         "deployment_type": None,
         "organizations": ",".join(orgs),
         "primary_organization": primary_org_from_names(orgs),
