@@ -44,6 +44,7 @@ TS_STATUS_MAP = {
     "Customer Replied": "Waiting for Support",
     "In Progress": "In Progress",
     "On Hold": "Pending",
+    "Closed - NR": "Closed",
 }
 
 
@@ -278,7 +279,7 @@ def map_calendar(cal):
 def main():
     parser = argparse.ArgumentParser(description="Import TeamSupport JSON data into the SQLite store")
     parser.add_argument("--db", default="support_stats.sqlite", help="Path to SQLite DB")
-    parser.add_argument("--input", default=str(Path("resource/reduced_tickets.json")), help="Path to JSON file")
+    parser.add_argument("--input", default=str(Path("resource/tickets.json")), help="Path to JSON file")
     args = parser.parse_args()
 
     with open(args.input, "r", encoding="utf-8") as f:
