@@ -5,6 +5,7 @@ import datetime
 import pytz
 import dateutil.parser
 from sqlalchemy import create_engine
+import urllib.parse
 
 import re
 
@@ -277,15 +278,23 @@ def map_calendar(cal):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Import TeamSupport JSON data into the SQLite store")
-    parser.add_argument("--db", default="support_stats.sqlite", help="Path to SQLite DB")
+    parser = argparse.ArgumentParser(description="Import TeamSupport JSON data into the database")
+    parser.add_argument("--db", default="support_stats.accdb", help="Path to database file")
+    parser.add_argument("--sqlite", action="store_true", help="Use SQLite database")
     parser.add_argument("--input", default=str(Path("resource/tickets.json")), help="Path to JSON file")
     args = parser.parse_args()
 
     with open(args.input, "r", encoding="utf-8") as f:
         tickets = json.load(f)
 
-    store = SQLiteStore(create_engine(f"sqlite+pysqlite:///{args.db}"))
+    if args.sqlite:
+        engine = create_engine(f"sqlite+pysqlite:///{args.db}")
+    else:
+        conn = urllib.parse.quote_plus(
+            f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={args.db}"
+        )
+        engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
+    store = SQLiteStore(engine)
     global ORG_PATTERNS
     ORG_PATTERNS = store.load_org_patterns()
 
