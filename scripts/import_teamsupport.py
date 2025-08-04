@@ -123,12 +123,15 @@ def map_ticket(t):
     last_resp = parse_dt(t.get("LastResponseDate"))
     orgs = extract_orgs(t)
     priority_txt, priority_pos = severity_to_priority(t.get("Severity"))
+    assignee = t.get("UserName")
+    if assignee and assignee.strip().lower() == "unassigned":
+        assignee = None
     return {
         "id": str(t.get("ID")),
         "key": str(t.get("TicketNumber")),
         "summary": (t.get("TicketName") or t.get("Name") or "").strip(),
         "status": map_status(t.get("Status")),
-        "assignee": t.get("UserName"),
+        "assignee": assignee,
         "assignee_email": None,
         "creator": t.get("CreatorName"),
         "creator_email": None,

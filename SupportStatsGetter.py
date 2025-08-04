@@ -156,8 +156,8 @@ class JiraCalendarRecord:
     public_comments: int = 0
     start_assigned_group: str = "1stLevel"
     end_assigned_group: str = "1stLevel"
-    start_assigned_user: str = "Unassigned"
-    end_assigned_user: str = "Unassigned"
+    start_assigned_user: str | None = None
+    end_assigned_user: str | None = None
     start_assigned_user_email: str | None = None
     end_assigned_user_email: str | None = None
     did_escalate_priority: bool = False
@@ -506,8 +506,8 @@ def make_jira_ticket_calendar(
             public_comments=day_public,
             start_assigned_group=day_start_group or "1stLevel",
             end_assigned_group=assigned_group or "1stLevel",
-            start_assigned_user=day_start_user or "Unassigned",
-            end_assigned_user=assigned_user or "Unassigned",
+            start_assigned_user=day_start_user,
+            end_assigned_user=assigned_user,
             start_assigned_user_email=day_start_user_email,
             end_assigned_user_email=assigned_user_email,
             did_escalate_priority=day_start_priority_pos < priority_pos,
@@ -882,9 +882,9 @@ class SQLiteStore:
                     SELECT
                         jc.cw AS cw,
                         COUNT(DISTINCT jc.ticket_id) AS overall_open,
-                        COUNT(DISTINCT CASE WHEN DATE(jt.created) <= DATE(jc.date, '-5 day') THEN jc.ticket_id END) AS aged_5,
-                        COUNT(DISTINCT CASE WHEN DATE(jt.created) <= DATE(jc.date, '-30 day') THEN jc.ticket_id END) AS aged_30,
-                        COUNT(DISTINCT CASE WHEN jt.assignee IS NULL OR jt.assignee = '' THEN jc.ticket_id END) AS unassigned,
+                        COUNT(DISTINCT CASE WHEN jc.total_days_open > 5 THEN jc.ticket_id END) AS aged_5,
+                        COUNT(DISTINCT CASE WHEN jc.total_days_open > 30 THEN jc.ticket_id END) AS aged_30,
+                        COUNT(DISTINCT CASE WHEN jc.end_assigned_user IS NULL OR jc.end_assigned_user = '' THEN jc.ticket_id END) AS unassigned,
                         COUNT(DISTINCT CASE WHEN LOWER(jc.end_status) NOT IN ({statuses}) AND jc.weekdays_days_since_last_contact > 5 THEN jc.ticket_id END) AS over5_no_contact
                     FROM jira_calendar jc
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
