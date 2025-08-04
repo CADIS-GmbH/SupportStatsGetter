@@ -143,10 +143,10 @@ class StatisticsDayRecord:
     ticket_nr: str
     actions: int = 0
     public_actions: int = 0
-    start_assigned_group: str = "Unassigned"
-    end_assigned_group: str = "Unassigned"
-    start_assigned_user: str = "Unassigned"
-    end_assigned_user: str = "Unassigned"
+    start_assigned_group: str = ""
+    end_assigned_group: str = ""
+    start_assigned_user: str = ""
+    end_assigned_user: str = ""
     did_escalate_severity: bool = False
     did_escalate_cs: bool = False
     did_escalate_management: bool = False
@@ -216,6 +216,10 @@ class StatisticsDayRecord:
         elif m := re.match(GROUP_ASSIGN_RE, hist["Description"]):
             old_s = m.group(1)
             new_s = m.group(2)
+            if old_s.lower() == "unassigned":
+                old_s = ""
+            if new_s.lower() == "unassigned":
+                new_s = ""
             if (not self.end_assigned_group == old_s) and "1st" not in old_s:
                 print(
                     f"WARNING: Ticket #{self.ticket_nr} inconsistent history group assign  action. Ticket group "
@@ -228,6 +232,10 @@ class StatisticsDayRecord:
         elif m := re.match(USER_ASSIGN_RE, hist["Description"]):
             old_s = m.group(1)
             new_s = m.group(2)
+            if old_s.lower() == "unassigned":
+                old_s = ""
+            if new_s.lower() == "unassigned":
+                new_s = ""
             if not self.end_assigned_user == old_s:
                 print(
                     f"WARNING: Ticket #{self.ticket_nr} inconsistent history user assign action. "
@@ -540,14 +548,20 @@ def make_ticket_calendar(t):
 
     calendar = []
     c_date = s_date_str
+    init_group = (t.get("GroupName") or "").strip()
+    if init_group.lower() == "unassigned":
+        init_group = ""
+    init_user = (t.get("UserName") or "").strip()
+    if init_user.lower() == "unassigned":
+        init_user = ""
     sdr = StatisticsDayRecord(
         ticket_id=t["ID"],
         ticket_nr=t["TicketNumber"],
         date=c_date,
-        start_assigned_group=(t.get("GroupName") or "Unassigned").strip() or "Unassigned",
-        end_assigned_group=(t.get("GroupName") or "Unassigned").strip() or "Unassigned",
-        start_assigned_user=(t.get("UserName") or "Unassigned").strip() or "Unassigned",
-        end_assigned_user=(t.get("UserName") or "Unassigned").strip() or "Unassigned",
+        start_assigned_group=init_group,
+        end_assigned_group=init_group,
+        start_assigned_user=init_user,
+        end_assigned_user=init_user,
         start_status=t.get("Status") or "New",
         end_status=t.get("Status") or "New",
         start_severity_txt=t.get("Severity") or "Normal",
