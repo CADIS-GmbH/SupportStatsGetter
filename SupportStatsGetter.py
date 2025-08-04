@@ -889,7 +889,7 @@ class SQLiteStore:
                     FROM jira_calendar jc
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
                     JOIN week_reporting wr ON wr.calendar_week = jc.cw
-                    WHERE (jc.start_priority_pos >= 300 OR jc.end_priority_pos >= 300)
+                    WHERE jc.end_priority_pos > 0
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
                     GROUP BY wr.{period_col}
@@ -900,7 +900,7 @@ class SQLiteStore:
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
                     JOIN week_reporting wr ON wr.calendar_week = jc.cw
                     WHERE jc.did_escalate_priority = 1
-                      AND jc.end_priority_pos >= 300
+                      AND jc.end_priority_pos > jc.start_priority_pos
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
                     GROUP BY wr.{period_col}
