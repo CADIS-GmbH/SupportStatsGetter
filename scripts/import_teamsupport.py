@@ -242,6 +242,12 @@ def map_history(hist, ticket_id):
 def map_calendar(cal):
     dt = parse_dt(cal.get("date"))
     modified = parse_dt(cal.get("DateModified"))
+    start_status = map_status(cal.get("start_status"))
+    end_status = map_status(cal.get("end_status"))
+    is_junk = bool_from_string(cal.get("is_junk"))
+    if is_junk is None:
+        status_for_junk = end_status or start_status or ""
+        is_junk = status_for_junk.lower() == "cancelled"
     return {
         "record_id": cal.get("ID"),
         "ticket_id": cal.get("ticket_id"),
@@ -263,14 +269,14 @@ def map_calendar(cal):
         "end_priority_txt": cal.get("end_severity_txt"),
         "end_priority_pos": cal.get("end_severity_pos"),
         "time_spent_min": cal.get("time_spent_min"),
-        "start_status": map_status(cal.get("start_status")),
-        "end_status": map_status(cal.get("end_status")),
+        "start_status": start_status,
+        "end_status": end_status,
         "did_resolve": bool_from_string(cal.get("did_resolve")),
         "total_days_open": cal.get("total_days_open"),
         "weekdays_days_since_last_contact": cal.get("weekdays_days_since_last_contact"),
         "adjusted_resolution_days": cal.get("adjusted_resolution_days"),
         "adjusted_resolution_weekdays": cal.get("adjusted_resolution_weekdays"),
-        "is_junk": bool_from_string(cal.get("is_junk")),
+        "is_junk": is_junk,
         "cw": convert_cw(cal.get("cw")),
         "weekday": cal.get("weekday"),
         "date_modified": modified,

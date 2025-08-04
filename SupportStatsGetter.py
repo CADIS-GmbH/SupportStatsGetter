@@ -743,6 +743,7 @@ class SQLiteStore:
             CREATE VIEW IF NOT EXISTS jira_tickets_reporting AS
             SELECT
                 jt.*,
+                CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
                 CASE
                     WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
                     ELSE 'SW'
@@ -767,11 +768,13 @@ class SQLiteStore:
             CREATE VIEW IF NOT EXISTS jira_worklogs_reporting AS
             SELECT
                 jw.*,
+                CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jw.started_week) AS started_reportingmonth,
                 (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jw.started_week) AS started_reportingquarter,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jw.created_week) AS created_reportingmonth,
                 (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jw.created_week) AS created_reportingquarter
             FROM jira_worklogs jw
+            LEFT JOIN jira_tickets jt ON jt.id = jw.ticket_id
         """
         with self.engine.begin() as conn:
             conn.execute(text("DROP VIEW IF EXISTS jira_worklogs_reporting"))
@@ -780,10 +783,41 @@ class SQLiteStore:
         calendar_view_sql = """
             CREATE VIEW IF NOT EXISTS jira_calendar_reporting AS
             SELECT
-                jc.*,
+                jc.record_id,
+                jc.ticket_id,
+                jc.ticket_key,
+                jc.date,
+                jc.comments,
+                jc.public_comments,
+                jc.start_assigned_group,
+                jc.end_assigned_group,
+                jc.start_assigned_user,
+                jc.end_assigned_user,
+                jc.start_assigned_user_email,
+                jc.end_assigned_user_email,
+                jc.did_escalate_priority,
+                jc.did_escalate_cs,
+                jc.did_escalate_management,
+                jc.start_priority_txt,
+                jc.start_priority_pos,
+                jc.end_priority_txt,
+                jc.end_priority_pos,
+                jc.time_spent_min,
+                jc.start_status,
+                jc.end_status,
+                jc.did_resolve,
+                jc.total_days_open,
+                jc.weekdays_days_since_last_contact,
+                jc.adjusted_resolution_days,
+                jc.adjusted_resolution_weekdays,
+                CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
+                jc.cw,
+                jc.weekday,
+                jc.date_modified,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jc.cw) AS cw_reportingmonth,
                 (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jc.cw) AS cw_reportingquarter
             FROM jira_calendar jc
+            LEFT JOIN jira_tickets jt ON jc.ticket_id = jt.id
         """
         with self.engine.begin() as conn:
             conn.execute(text("DROP VIEW IF EXISTS jira_calendar_reporting"))
@@ -797,6 +831,7 @@ class SQLiteStore:
                     WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
                     ELSE 'SW'
                 END AS request_type_category,
+                CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
                 aw.value AS active_week,
                 wr.reporting_month AS active_reportingmonth,
                 wr.reporting_quarter AS active_reportingquarter
@@ -817,6 +852,7 @@ class SQLiteStore:
                     WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
                     ELSE 'SW'
                 END AS request_type_category,
+                CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
                 jw.*
             FROM jira_tickets jt
             LEFT JOIN jira_worklogs jw ON jt.id = jw.ticket_id
