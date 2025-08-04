@@ -248,9 +248,20 @@ def map_calendar(cal):
     start_status = map_status(cal.get("start_status"))
     end_status = map_status(cal.get("end_status"))
     is_junk = bool_from_string(cal.get("is_junk"))
+
+    start_assigned_user = cal.get("start_assigned_user")
+    if start_assigned_user and start_assigned_user.strip().lower() == "unassigned":
+        start_assigned_user = None
+
+    end_assigned_user = cal.get("end_assigned_user")
+    if end_assigned_user and end_assigned_user.strip().lower() == "unassigned":
+        end_assigned_user = None
+
     if is_junk is None:
         status_for_junk = end_status or start_status or ""
         is_junk = status_for_junk.lower() == "cancelled"
+
+
     return {
         "record_id": cal.get("ID"),
         "ticket_id": cal.get("ticket_id"),
@@ -260,8 +271,8 @@ def map_calendar(cal):
         "public_comments": cal.get("public_actions"),
         "start_assigned_group": cal.get("start_assigned_group"),
         "end_assigned_group": cal.get("end_assigned_group"),
-        "start_assigned_user": cal.get("start_assigned_user"),
-        "end_assigned_user": cal.get("end_assigned_user"),
+        "start_assigned_user": start_assigned_user,
+        "end_assigned_user": end_assigned_user,
         "start_assigned_user_email": None,
         "end_assigned_user_email": None,
         "did_escalate_priority": bool_from_string(cal.get("did_escalate_severity")),
