@@ -1370,7 +1370,13 @@ class SupportStatsGetter:
                     "emailAddress": c.get("author_email"),
                 }
                 updated = dict(c)
-                updated["internal_user"] = is_internal_user(author)
+                # Preserve stored flag if no email is present to avoid
+                # misclassifying internal comments
+                internal_stored = c.get("internal_user")
+                if internal_stored is not None and not c.get("author_email"):
+                    updated["internal_user"] = internal_stored
+                else:
+                    updated["internal_user"] = is_internal_user(author)
                 updated_comments.append(updated)
             self.store.insert_many(self.store.jira_comments, updated_comments)
 
