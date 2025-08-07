@@ -35,7 +35,12 @@ PRIORITY_POS_MAP = {
     "A": 100,
     "AA": 200,
     "Offen": 0,
-    "Open": 0
+    "Open": 0,
+    "Low": -100,
+    "Normal": 0,
+    "Medium": 0,
+    "High": 100,
+    "Critical": 200,
 }
 
 # Order of labels used to determine assigned group
