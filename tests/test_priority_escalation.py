@@ -7,6 +7,7 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from SupportStatsGetter import Config, SupportStatsGetter
+from scripts.import_teamsupport import map_history
 
 
 def test_recalculate_all_preserves_priority_escalation(tmp_path):
@@ -110,5 +111,67 @@ def test_recalculate_all_preserves_priority_escalation(tmp_path):
         )
     assert any(
         r["date"].date() == change_time.date() and r["did_escalate_priority"]
+        for r in rows
+    )
+
+
+def test_recalculate_all_detects_priority_escalation_from_history(tmp_path):
+    config = Config(db_path=tmp_path / "test.db")
+    getter = SupportStatsGetter(config, use_sqlite=True)
+
+    ticket_id = "T-1"
+    created = datetime.datetime(2023, 1, 1, 0, 0)
+    change_time = datetime.datetime(2023, 1, 2, 12, 0)
+
+    getter.store.insert_many(getter.store.jira_tickets, [
+        {
+            "id": ticket_id,
+            "key": ticket_id,
+            "summary": "Test",
+            "status": "Open",
+            "priority": "Normal",
+            "priority_pos": 0,
+            "created": created,
+            "updated": change_time,
+        }
+    ])
+
+    hist = {
+        "ID": "h1",
+        "Description": "Changed severity from 'Normal' to 'Critical'",
+        "Actor": "Agent",
+        "CreatorID": "0",
+        "DateCreated": change_time.isoformat(),
+    }
+    cl = map_history(hist, ticket_id)
+    cl["created"] = cl["created"].replace(tzinfo=None)
+
+    getter.store.insert_many(getter.store.jira_changelog, [cl])
+
+    getter.recalculate_all()
+
+    with getter.store.engine.connect() as conn:
+        rows = (
+            conn.execute(
+                select(
+                    getter.store.jira_calendar.c.date,
+                    getter.store.jira_calendar.c.start_priority_txt,
+                    getter.store.jira_calendar.c.end_priority_txt,
+                    getter.store.jira_calendar.c.start_priority_pos,
+                    getter.store.jira_calendar.c.end_priority_pos,
+                    getter.store.jira_calendar.c.did_escalate_priority,
+                ).where(getter.store.jira_calendar.c.ticket_id == ticket_id)
+            )
+            .mappings()
+            .all()
+        )
+
+    assert any(
+        r["date"].date() == change_time.date()
+        and r["start_priority_txt"] == "Normal"
+        and r["end_priority_txt"] == "Critical"
+        and r["start_priority_pos"] == 0
+        and r["end_priority_pos"] == 200
+        and r["did_escalate_priority"]
         for r in rows
     )
