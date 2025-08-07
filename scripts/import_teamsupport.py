@@ -219,7 +219,7 @@ def map_history(hist, ticket_id):
         from_string = m.group(1)
         to_string = m.group(2)
     elif m := re.match(SEVERITY_CHANGE_RE, desc):
-        field = "severity"
+        field = "priority"
         from_string = m.group(1)
         to_string = m.group(2)
     else:
