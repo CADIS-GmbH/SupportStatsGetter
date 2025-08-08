@@ -576,6 +576,17 @@ class DatabaseStore:
         self.meta = MetaData()
         self._prepare_schema()
 
+    def _drop_view_if_exists(self, conn, view_name: str) -> None:
+        """Drop a SQL view if it exists for the current connection.
+
+        Microsoft Access does not support the ``DROP VIEW IF EXISTS`` syntax.
+        To maintain compatibility across different backends we inspect the
+        connection for existing views and drop the view explicitly if present.
+        """
+        inspector = sa_inspect(conn)
+        if view_name in inspector.get_view_names():
+            conn.execute(text(f"DROP VIEW {view_name}"))
+
     @log_call
     def _prepare_schema(self) -> None:
         self.jira_tickets = Table(
@@ -758,7 +769,7 @@ class DatabaseStore:
 
         # create a view exposing reporting month and quarter columns
         view_sql = """
-            CREATE VIEW IF NOT EXISTS jira_tickets_reporting AS
+            CREATE VIEW jira_tickets_reporting AS
             SELECT
                 jt.*,
                 CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
@@ -779,11 +790,11 @@ class DatabaseStore:
             FROM jira_tickets jt
         """
         with self.engine.begin() as conn:
-            conn.execute(text("DROP VIEW IF EXISTS jira_tickets_reporting"))
+            self._drop_view_if_exists(conn, "jira_tickets_reporting")
             conn.execute(text(view_sql))
 
         worklog_view_sql = """
-            CREATE VIEW IF NOT EXISTS jira_worklogs_reporting AS
+            CREATE VIEW jira_worklogs_reporting AS
             SELECT
                 jw.*,
                 CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
@@ -795,11 +806,11 @@ class DatabaseStore:
             LEFT JOIN jira_tickets jt ON jt.id = jw.ticket_id
         """
         with self.engine.begin() as conn:
-            conn.execute(text("DROP VIEW IF EXISTS jira_worklogs_reporting"))
+            self._drop_view_if_exists(conn, "jira_worklogs_reporting")
             conn.execute(text(worklog_view_sql))
 
         calendar_view_sql = """
-            CREATE VIEW IF NOT EXISTS jira_calendar_reporting AS
+            CREATE VIEW jira_calendar_reporting AS
             SELECT
                 jc.record_id,
                 jc.ticket_id,
@@ -838,11 +849,11 @@ class DatabaseStore:
             LEFT JOIN jira_tickets jt ON jc.ticket_id = jt.id
         """
         with self.engine.begin() as conn:
-            conn.execute(text("DROP VIEW IF EXISTS jira_calendar_reporting"))
+            self._drop_view_if_exists(conn, "jira_calendar_reporting")
             conn.execute(text(calendar_view_sql))
 
         activeweeks_view_sql = """
-            CREATE VIEW IF NOT EXISTS jira_tickets_active_weeks AS
+            CREATE VIEW jira_tickets_active_weeks AS
             SELECT
                 jt.*,
                 CASE
@@ -859,11 +870,11 @@ class DatabaseStore:
             LEFT JOIN week_reporting wr ON wr.calendar_week = aw.value
         """
         with self.engine.begin() as conn:
-            conn.execute(text("DROP VIEW IF EXISTS jira_tickets_active_weeks"))
+            self._drop_view_if_exists(conn, "jira_tickets_active_weeks")
             conn.execute(text(activeweeks_view_sql))
 
         ticket_worklogs_view_sql = """
-            CREATE VIEW IF NOT EXISTS jira_tickets_worklogs AS
+            CREATE VIEW jira_tickets_worklogs AS
             SELECT
                 jt.*,
                 CASE
@@ -876,13 +887,13 @@ class DatabaseStore:
             LEFT JOIN jira_worklogs jw ON jt.id = jw.ticket_id
         """
         with self.engine.begin() as conn:
-            conn.execute(text("DROP VIEW IF EXISTS jira_tickets_worklogs"))
+            self._drop_view_if_exists(conn, "jira_tickets_worklogs")
             conn.execute(text(ticket_worklogs_view_sql))
 
         statuses = ",".join(f"'{s.lower()}'" for s in NO_CONTACT_IGNORE_STATUSES)
 
         summary_view_template = """
-            CREATE VIEW IF NOT EXISTS {view_name} AS
+            CREATE VIEW {view_name} AS
             WITH
                 active AS (
                     SELECT
@@ -1073,9 +1084,9 @@ class DatabaseStore:
         )
 
         with self.engine.begin() as conn:
-            conn.execute(text("DROP VIEW IF EXISTS weekly_support_summary"))
-            conn.execute(text("DROP VIEW IF EXISTS monthly_support_summary"))
-            conn.execute(text("DROP VIEW IF EXISTS quarterly_support_summary"))
+            self._drop_view_if_exists(conn, "weekly_support_summary")
+            self._drop_view_if_exists(conn, "monthly_support_summary")
+            self._drop_view_if_exists(conn, "quarterly_support_summary")
             conn.execute(text(weekly_report_view_sql))
             conn.execute(text(monthly_report_view_sql))
             conn.execute(text(quarterly_report_view_sql))
