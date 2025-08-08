@@ -1357,9 +1357,13 @@ class SupportStatsGetter:
     def recalculate_all(self) -> None:
         """Recalculate KPI and mapped fields for all stored tickets."""
         with self.store.engine.connect() as conn:
-            tickets = conn.execute(select(self.store.jira_tickets.c.id)).fetchall()
+            tickets = [tid for (tid,) in conn.execute(select(self.store.jira_tickets.c.id)).fetchall()]
+        self.recalculate_tickets(tickets)
 
-        for (ticket_id,) in tickets:
+    @log_call
+    def recalculate_tickets(self, ticket_ids: Iterable[str]) -> None:
+        """Recalculate KPI and mapped fields for the given ticket ids."""
+        for ticket_id in ticket_ids:
             issue_row, comments, worklogs, changelog = self.store.get_ticket_with_related(
                 ticket_id
             )
@@ -1814,6 +1818,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Use SQLite database instead of Access",
     )
+    parser.add_argument(
+        "--recalculate-all",
+        action="store_true",
+        help="Recalculate KPI fields for all stored tickets",
+    )
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -1858,7 +1867,10 @@ if __name__ == "__main__":
                     changelog_total += len(hist.get("items", []))
 
             getter.store_jira_tickets(processed)
-            getter.recalculate_all()
+            if args.recalculate_all:
+                getter.recalculate_all()
+            else:
+                getter.recalculate_tickets([issue["id"] for issue in processed])
             logging.info(
                 f"Stored {len(processed)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs, {changelog_total} changelog items and {calendar_total} calendar rows in {cfg.db_path}"
             )
