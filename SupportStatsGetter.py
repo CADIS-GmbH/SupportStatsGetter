@@ -72,7 +72,7 @@ NO_CONTACT_IGNORE_STATUSES = {
 }
 
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
-JIRA_PULL_OVERLAP_MIN = 5
+JIRA_PULL_OVERLAP_MIN = 1 #60*24*7  #5
 
 import requests
 import dateutil.parser
