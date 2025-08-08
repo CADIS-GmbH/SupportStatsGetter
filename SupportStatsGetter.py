@@ -375,7 +375,6 @@ def make_jira_ticket_calendar(
         return []
     end_dt = (
         issue.get("resolved")
-        or issue.get("updated")
         or datetime.datetime.now(datetime.UTC)
     )
 
