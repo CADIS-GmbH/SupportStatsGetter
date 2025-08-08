@@ -10,7 +10,7 @@ import urllib.parse
 import re
 
 from SupportStatsGetter import (
-    SQLiteStore,
+    DatabaseStore,
     cw_string_from_datetime,
     primary_org_from_names,
     ORG_PATTERNS,
@@ -320,7 +320,7 @@ def main():
             f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={str(db_path)}"
         )
         engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
-    store = SQLiteStore(engine)
+    store = DatabaseStore(engine)
     global ORG_PATTERNS
     ORG_PATTERNS = store.load_org_patterns()
 

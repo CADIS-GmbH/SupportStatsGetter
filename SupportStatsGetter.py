@@ -548,7 +548,7 @@ def make_jira_ticket_calendar(
     return results
 
 
-class SQLiteStore:
+class DatabaseStore:
     """Simple wrapper around a database using SQLAlchemy."""
 
     @log_call
@@ -1334,7 +1334,7 @@ class SupportStatsGetter:
                 f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={str(db_path)}"
             )
             engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
-        self.store = SQLiteStore(engine)
+        self.store = DatabaseStore(engine)
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
         global ORG_PATTERNS
