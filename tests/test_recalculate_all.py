@@ -70,3 +70,103 @@ def test_recalculate_all_preserves_response_dates_for_comments_without_email(tmp
 
     assert row["first_response_date"] == comment_time
     assert row["last_response_date"] == comment_time
+
+
+def test_recalculate_tickets_only_updates_specified_tickets(tmp_path):
+    config = Config(db_path=tmp_path / "test.db")
+    getter = SupportStatsGetter(config, use_sqlite=True)
+
+    created = datetime.datetime(2023, 1, 1, 0, 0)
+    comment_time = created + datetime.timedelta(hours=1)
+
+    # Ticket that will be recalculated
+    getter.store.insert_many(getter.store.jira_tickets, [
+        {
+            "id": "T-1",
+            "key": "T-1",
+            "summary": "Test",
+            "status": "Open",
+            "created": created,
+            "updated": comment_time,
+        },
+        {
+            "id": "T-2",
+            "key": "T-2",
+            "summary": "Test",
+            "status": "Open",
+            "created": created,
+            "updated": comment_time,
+        },
+    ])
+
+    # Comments for both tickets
+    getter.store.insert_many(getter.store.jira_comments, [
+        {
+            "id": "c0",
+            "ticket_id": "T-1",
+            "issue_key": "T-1",
+            "author": "Customer",
+            "author_email": "cust@example.com",
+            "body": "Initial",
+            "public": True,
+            "internal_user": False,
+            "created": created,
+            "updated": created,
+        },
+        {
+            "id": "c1",
+            "ticket_id": "T-1",
+            "issue_key": "T-1",
+            "author": "Agent",
+            "author_email": None,
+            "body": "Response",
+            "public": True,
+            "internal_user": True,
+            "created": comment_time,
+            "updated": comment_time,
+        },
+        {
+            "id": "c2",
+            "ticket_id": "T-2",
+            "issue_key": "T-2",
+            "author": "Customer",
+            "author_email": "cust@example.com",
+            "body": "Initial",
+            "public": True,
+            "internal_user": False,
+            "created": created,
+            "updated": created,
+        },
+        {
+            "id": "c3",
+            "ticket_id": "T-2",
+            "issue_key": "T-2",
+            "author": "Agent",
+            "author_email": None,
+            "body": "Response",
+            "public": True,
+            "internal_user": True,
+            "created": comment_time,
+            "updated": comment_time,
+        },
+    ])
+
+    getter.recalculate_tickets(["T-1"])
+
+    with getter.store.engine.connect() as conn:
+        rows = (
+            conn.execute(
+                select(
+                    getter.store.jira_tickets.c.id,
+                    getter.store.jira_tickets.c.first_response_date,
+                ).order_by(getter.store.jira_tickets.c.id)
+            )
+            .mappings()
+            .all()
+        )
+
+    row1 = next(r for r in rows if r["id"] == "T-1")
+    row2 = next(r for r in rows if r["id"] == "T-2")
+
+    assert row1["first_response_date"] == comment_time
+    assert row2["first_response_date"] is None
