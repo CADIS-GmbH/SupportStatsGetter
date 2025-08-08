@@ -77,12 +77,14 @@ JIRA_PULL_OVERLAP_MIN = 1 #60*24*7  #5
 import requests
 import dateutil.parser
 import pytz
+import pyodbc
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, DateTime, Boolean,
     Integer, Float, Text, ForeignKey, select, func, text, delete,
     inspect as sa_inspect
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 
 
 def log_call(func):
@@ -556,14 +558,20 @@ class DatabaseStore:
         if engine is None:
             db_path = Path("support_stats.accdb").resolve()
             if not db_path.is_file():
-                raise FileNotFoundError(
+                raise RuntimeError(
                     f"Access database not found at {db_path}. "
                     "Please create the .accdb file or provide a correct path."
                 )
             conn = urllib.parse.quote_plus(
                 f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={str(db_path)}"
             )
-            engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
+            try:
+                engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
+            except (pyodbc.Error, DBAPIError) as exc:
+                raise RuntimeError(
+                    f"Failed to connect to Access database at {db_path}. "
+                    "Please check the config or create the .accdb file."
+                ) from exc
         self.engine = engine
         self.meta = MetaData()
         self._prepare_schema()
@@ -1326,14 +1334,20 @@ class SupportStatsGetter:
         else:
             db_path = config.db_path.resolve()
             if not db_path.is_file():
-                raise FileNotFoundError(
+                raise RuntimeError(
                     f"Access database not found at {db_path}. "
                     "Please create the .accdb file or provide a correct path."
                 )
             conn = urllib.parse.quote_plus(
                 f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={str(db_path)}"
             )
-            engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
+            try:
+                engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
+            except (pyodbc.Error, DBAPIError) as exc:
+                raise RuntimeError(
+                    f"Failed to connect to Access database at {db_path}. "
+                    "Please check the config or create the .accdb file."
+                ) from exc
         self.store = DatabaseStore(engine)
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
