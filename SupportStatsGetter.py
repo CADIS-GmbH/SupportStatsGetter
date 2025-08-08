@@ -553,12 +553,18 @@ class SQLiteStore:
 
     @log_call
     def __init__(self, engine: Engine | None = None):
-        self.engine = engine or create_engine(
-            "access+pyodbc:///?odbc_connect="
-            + urllib.parse.quote_plus(
-                "DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=support_stats.accdb"
+        if engine is None:
+            db_path = Path("support_stats.accdb").resolve()
+            if not db_path.is_file():
+                raise FileNotFoundError(
+                    f"Access database not found at {db_path}. "
+                    "Please create the .accdb file or provide a correct path."
+                )
+            conn = urllib.parse.quote_plus(
+                f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={str(db_path)}"
             )
-        )
+            engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
+        self.engine = engine
         self.meta = MetaData()
         self._prepare_schema()
 
@@ -1318,8 +1324,14 @@ class SupportStatsGetter:
         if use_sqlite:
             engine = create_engine(f"sqlite+pysqlite:///{config.db_path}")
         else:
+            db_path = config.db_path.resolve()
+            if not db_path.is_file():
+                raise FileNotFoundError(
+                    f"Access database not found at {db_path}. "
+                    "Please create the .accdb file or provide a correct path."
+                )
             conn = urllib.parse.quote_plus(
-                f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={config.db_path}"
+                f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={str(db_path)}"
             )
             engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
         self.store = SQLiteStore(engine)
