@@ -862,20 +862,35 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "jira_calendar_reporting")
             conn.execute(text(calendar_view_sql))
 
-        activeweeks_view_sql = f"""
-            CREATE VIEW jira_tickets_active_weeks AS
-            SELECT
-                jt.*,
-                {request_type_expr} AS request_type_category,
-                {is_junk_expr} AS is_junk,
-                aw.value AS active_week,
-                wr.reporting_month AS active_reportingmonth,
-                wr.reporting_quarter AS active_reportingquarter
-            FROM jira_tickets jt
-            JOIN json_each('["' || replace(jt.active_weeks, ',', '","') || '"]') aw
-                ON 1=1
-            LEFT JOIN week_reporting wr ON wr.calendar_week = aw.value
-        """
+        if is_access:
+            activeweeks_view_sql = f"""
+                CREATE VIEW jira_tickets_active_weeks AS
+                SELECT
+                    jt.*,
+                    {request_type_expr} AS request_type_category,
+                    {is_junk_expr} AS is_junk,
+                    wr.calendar_week AS active_week,
+                    wr.reporting_month AS active_reportingmonth,
+                    wr.reporting_quarter AS active_reportingquarter
+                FROM jira_tickets jt
+                JOIN week_reporting wr
+                    ON instr(',' & jt.active_weeks & ',', ',' & wr.calendar_week & ',') > 0
+            """
+        else:
+            activeweeks_view_sql = f"""
+                CREATE VIEW jira_tickets_active_weeks AS
+                SELECT
+                    jt.*,
+                    {request_type_expr} AS request_type_category,
+                    {is_junk_expr} AS is_junk,
+                    aw.value AS active_week,
+                    wr.reporting_month AS active_reportingmonth,
+                    wr.reporting_quarter AS active_reportingquarter
+                FROM jira_tickets jt
+                JOIN json_each('["' || replace(jt.active_weeks, ',', '","') || '"]') aw
+                    ON 1=1
+                LEFT JOIN week_reporting wr ON wr.calendar_week = aw.value
+            """
         with self.engine.begin() as conn:
             self._drop_view_if_exists(conn, "jira_tickets_active_weeks")
             conn.execute(text(activeweeks_view_sql))
