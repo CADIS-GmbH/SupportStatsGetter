@@ -881,8 +881,8 @@ class DatabaseStore:
                     wr.calendar_week AS active_week,
                     wr.reporting_month AS active_reportingmonth,
                     wr.reporting_quarter AS active_reportingquarter
-                FROM jira_tickets jt
-                JOIN week_reporting wr
+                FROM jira_tickets AS jt
+                INNER JOIN week_reporting AS wr
                     ON instr(',' & jt.active_weeks & ',', ',' & wr.calendar_week & ',') > 0
             """
         else:
