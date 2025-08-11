@@ -2,7 +2,7 @@
 ====================
 
 Tool for collecting ticket statistics from **Jira Service Management**.
-The data is stored in a normalized Access database by default. Pass ``--sqlite`` on the command line to use a SQLite database instead. The code is based on
+The data is stored in a normalized SQLite database. The code is based on
 ``TeamSupportStatsGetter.py`` but no longer supports TeamSupport.
 """
 
@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Pattern, Mapping
 import re
-import urllib.parse
 
 # Email patterns of internal agents used to detect response times. The patterns
 # are loaded from the ``internal_users`` table at runtime.
@@ -77,7 +76,6 @@ JIRA_PULL_OVERLAP_MIN = 5 #60*24*7  #5
 import requests
 import dateutil.parser
 import pytz
-import pyodbc
 import pandas as pd
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, DateTime, Boolean,
@@ -85,7 +83,6 @@ from sqlalchemy import (
     inspect as sa_inspect
 )
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import DBAPIError
 
 
 def log_call(func):
@@ -127,7 +124,7 @@ def setup_logging(level: str, log_file: Path) -> None:
 class Config:
     """Runtime configuration values."""
 
-    db_path: Path = Path("support_stats.accdb")
+    db_path: Path = Path("support_stats.sqlite")
     jira_base_url: str | None = None
     jira_user: str | None = None
     jira_token: str | None = None
@@ -142,7 +139,7 @@ class Config:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return Config(
-            db_path=Path(data.get("db_path", "support_stats.accdb")),
+            db_path=Path(data.get("db_path", "support_stats.sqlite")),
             jira_base_url=data.get("jira_base_url"),
             jira_user=data.get("jira_user"),
             jira_token=data.get("jira_token"),
@@ -557,45 +554,16 @@ class DatabaseStore:
     @log_call
     def __init__(self, engine: Engine | None = None):
         if engine is None:
-            db_path = Path("support_stats.accdb").resolve()
-            if not db_path.is_file():
-                raise RuntimeError(
-                    f"Access database not found at {db_path}. "
-                    "Please create the .accdb file or provide a correct path."
-                )
-            conn = urllib.parse.quote_plus(
-                f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={str(db_path)}"
-            )
-            try:
-                engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
-            except (pyodbc.Error, DBAPIError) as exc:
-                raise RuntimeError(
-                    f"Failed to connect to Access database at {db_path}. "
-                    "Please check the config or create the .accdb file."
-                ) from exc
+            engine = create_engine("sqlite+pysqlite:///support_stats.sqlite")
         self.engine = engine
         self.meta = MetaData()
         self._prepare_schema()
 
     def _drop_view_if_exists(self, conn, view_name: str) -> None:
-        """Drop a SQL view if it exists for the current connection.
-
-        Microsoft Access does not support the ``DROP VIEW IF EXISTS`` syntax.
-        To maintain compatibility across different backends we inspect the
-        connection for existing views and drop the view explicitly if present.
-
-        Additionally, executing raw ``DROP VIEW`` statements through the
-        Access ODBC driver raises a ``ProgrammingError``.  The driver expects
-        ``DROP TABLE`` to remove query objects instead of the standard
-        ``DROP VIEW`` syntax.  We therefore switch to ``DROP TABLE`` when the
-        underlying SQLAlchemy dialect is Access.
-        """
+        """Drop a SQL view if it exists for the current connection."""
         inspector = sa_inspect(conn)
         if view_name in inspector.get_view_names():
-            if conn.dialect.name == "access":
-                conn.execute(text(f"DROP TABLE {view_name}"))
-            else:
-                conn.execute(text(f"DROP VIEW {view_name}"))
+            conn.execute(text(f"DROP VIEW {view_name}"))
 
     @log_call
     def _prepare_schema(self) -> None:
@@ -777,18 +745,8 @@ class DatabaseStore:
                     )
                 conn.execute(self.week_reporting.insert(), rows)
 
-        is_access = self.engine.dialect.name == "access"
-        lower_func = "LCase" if is_access else "LOWER"
-        is_junk_expr = (
-            f"IIF({lower_func}(jt.status) = 'cancelled', 1, 0)"
-            if is_access
-            else f"CASE WHEN {lower_func}(jt.status) = 'cancelled' THEN 1 ELSE 0 END"
-        )
-        request_type_expr = (
-            "IIF(jt.request_type LIKE '%Hardware%', 'HW', 'SW')"
-            if is_access
-            else "CASE WHEN jt.request_type LIKE '%Hardware%' THEN 'HW' ELSE 'SW' END"
-        )
+        is_junk_expr = "CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END"
+        request_type_expr = "CASE WHEN jt.request_type LIKE '%Hardware%' THEN 'HW' ELSE 'SW' END"
 
         # create a view exposing reporting month and quarter columns
         view_sql = f"""
@@ -872,35 +830,20 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "jira_calendar_reporting")
             conn.execute(text(calendar_view_sql))
 
-        if is_access:
-            activeweeks_view_sql = f"""
-                CREATE VIEW jira_tickets_active_weeks AS
-                SELECT
-                    jt.*,
-                    {request_type_expr} AS request_type_category,
-                    {is_junk_expr} AS is_junk,
-                    wr.calendar_week AS active_week,
-                    wr.reporting_month AS active_reportingmonth,
-                    wr.reporting_quarter AS active_reportingquarter
-                FROM jira_tickets AS jt
-                INNER JOIN week_reporting AS wr
-                    ON instr(',' & jt.active_weeks & ',', ',' & wr.calendar_week & ',') > 0
-            """
-        else:
-            activeweeks_view_sql = f"""
-                CREATE VIEW jira_tickets_active_weeks AS
-                SELECT
-                    jt.*,
-                    {request_type_expr} AS request_type_category,
-                    {is_junk_expr} AS is_junk,
-                    aw.value AS active_week,
-                    wr.reporting_month AS active_reportingmonth,
-                    wr.reporting_quarter AS active_reportingquarter
-                FROM jira_tickets jt
-                JOIN json_each('["' || replace(jt.active_weeks, ',', '","') || '"]') aw
-                    ON 1=1
-                LEFT JOIN week_reporting wr ON wr.calendar_week = aw.value
-            """
+        activeweeks_view_sql = f"""
+            CREATE VIEW jira_tickets_active_weeks AS
+            SELECT
+                jt.*,
+                {request_type_expr} AS request_type_category,
+                {is_junk_expr} AS is_junk,
+                aw.value AS active_week,
+                wr.reporting_month AS active_reportingmonth,
+                wr.reporting_quarter AS active_reportingquarter
+            FROM jira_tickets jt
+            JOIN json_each('["' || replace(jt.active_weeks, ',', '","') || '"]') aw
+                ON 1=1
+            LEFT JOIN week_reporting wr ON wr.calendar_week = aw.value
+        """
         with self.engine.begin() as conn:
             self._drop_view_if_exists(conn, "jira_tickets_active_weeks")
             conn.execute(text(activeweeks_view_sql))
@@ -1073,38 +1016,22 @@ class DatabaseStore:
         """
 
         def build_summary_view_sql(view_name: str, period_col: str, select_cols: str) -> str:
-            if is_access:
-                aged_30_subquery = f"""
-                    SELECT TOP 1 fw2.aged_30
-                    FROM friday_week fw2
-                    JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
-                    WHERE wr2.{period_col} = wr.{period_col}
-                    ORDER BY fw2.cw DESC
-                """
-                aged_5_subquery = f"""
-                    SELECT TOP 1 fw2.aged_5
-                    FROM friday_week fw2
-                    JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
-                    WHERE wr2.{period_col} = wr.{period_col}
-                    ORDER BY fw2.cw DESC
-                """
-            else:
-                aged_30_subquery = f"""
-                    SELECT fw2.aged_30
-                    FROM friday_week fw2
-                    JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
-                    WHERE wr2.{period_col} = wr.{period_col}
-                    ORDER BY fw2.cw DESC
-                    LIMIT 1
-                """
-                aged_5_subquery = f"""
-                    SELECT fw2.aged_5
-                    FROM friday_week fw2
-                    JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
-                    WHERE wr2.{period_col} = wr.{period_col}
-                    ORDER BY fw2.cw DESC
-                    LIMIT 1
-                """
+            aged_30_subquery = f"""
+                SELECT fw2.aged_30
+                FROM friday_week fw2
+                JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
+                WHERE wr2.{period_col} = wr.{period_col}
+                ORDER BY fw2.cw DESC
+                LIMIT 1
+            """
+            aged_5_subquery = f"""
+                SELECT fw2.aged_5
+                FROM friday_week fw2
+                JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
+                WHERE wr2.{period_col} = wr.{period_col}
+                ORDER BY fw2.cw DESC
+                LIMIT 1
+            """
 
             return summary_view_template.format(
                 view_name=view_name,
@@ -1137,12 +1064,9 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "weekly_support_summary")
             self._drop_view_if_exists(conn, "monthly_support_summary")
             self._drop_view_if_exists(conn, "quarterly_support_summary")
-            # Microsoft Access has limited SQL support and cannot create these complex
-            # summary views. Skip view creation when using the Access backend.
-            if not is_access:
-                conn.execute(text(weekly_report_view_sql))
-                conn.execute(text(monthly_report_view_sql))
-                conn.execute(text(quarterly_report_view_sql))
+            conn.execute(text(weekly_report_view_sql))
+            conn.execute(text(monthly_report_view_sql))
+            conn.execute(text(quarterly_report_view_sql))
 
         inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
@@ -1391,27 +1315,9 @@ class SupportStatsGetter:
     """Retrieve Jira ticket data and store it in the configured database."""
 
     @log_call
-    def __init__(self, config: Config, *, use_sqlite: bool = False):
+    def __init__(self, config: Config):
         self.config = config
-        if use_sqlite:
-            engine = create_engine(f"sqlite+pysqlite:///{config.db_path}")
-        else:
-            db_path = config.db_path.resolve()
-            if not db_path.is_file():
-                raise RuntimeError(
-                    f"Access database not found at {db_path}. "
-                    "Please create the .accdb file or provide a correct path."
-                )
-            conn = urllib.parse.quote_plus(
-                f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={str(db_path)}"
-            )
-            try:
-                engine = create_engine(f"access+pyodbc:///?odbc_connect={conn}")
-            except (pyodbc.Error, DBAPIError) as exc:
-                raise RuntimeError(
-                    f"Failed to connect to Access database at {db_path}. "
-                    "Please check the config or create the .accdb file."
-                ) from exc
+        engine = create_engine(f"sqlite+pysqlite:///{config.db_path}")
         self.store = DatabaseStore(engine)
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
@@ -1917,11 +1823,6 @@ if __name__ == "__main__":
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
     )
     parser.add_argument(
-        "--sqlite",
-        action="store_true",
-        help="Use SQLite database instead of Access",
-    )
-    parser.add_argument(
         "--recalculate-all",
         action="store_true",
         help="Recalculate KPI fields for all stored tickets",
@@ -1931,7 +1832,7 @@ if __name__ == "__main__":
         nargs="?",
         const="SupportStats.xlsx",
         default=None,
-        help="Export all views to an Excel workbook (SQLite only). If filename is omitted, uses 'SupportStats.xlsx'.",
+        help="Export all views to an Excel workbook. If filename is omitted, uses 'SupportStats.xlsx'.",
     )
     args = parser.parse_args()
 
@@ -1945,7 +1846,7 @@ if __name__ == "__main__":
     log_level = args.log_level or cfg.log_level
     setup_logging(log_level, cfg.log_file)
 
-    getter = SupportStatsGetter(cfg, use_sqlite=args.sqlite)
+    getter = SupportStatsGetter(cfg)
     if cfg.jira_base_url:
         try:
             since = getter.latest_update_timestamp()
@@ -1990,7 +1891,4 @@ if __name__ == "__main__":
         logging.error("Jira configuration missing in config file.")
 
     if args.output_excel:
-        if not args.sqlite:
-            logging.error("--output-excel requires --sqlite")
-        else:
-            getter.export_views_to_excel(Path(args.output_excel))
+        getter.export_views_to_excel(Path(args.output_excel))

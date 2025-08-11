@@ -3,7 +3,5 @@ python-dateutil
 pytz
 SQLAlchemy
 html2text
-pyodbc
-sqlalchemy-access
 pandas
 openpyxl
