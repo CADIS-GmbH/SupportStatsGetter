@@ -5,3 +5,5 @@ SQLAlchemy
 html2text
 pyodbc
 sqlalchemy-access
+pandas
+openpyxl

@@ -31,6 +31,8 @@ pip install -r requirements.txt
 python SupportStatsGetter.py --config config.json --log-level DEBUG
 ```
 Fetched tickets will be stored in the Access database specified in the config file. Pass `--sqlite` to use SQLite instead.
+When using SQLite, `--output-excel [filename]` writes all database views to an Excel
+workbook. If no filename is provided the file `SupportStats.xlsx` is created.
 Subsequent runs only request tickets updated after the newest record already stored.
 Comments and worklogs for each ticket are downloaded and saved alongside the tickets.
 Comments include a `public` flag to indicate visibility in the service desk.
