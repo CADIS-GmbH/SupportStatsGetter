@@ -9,3 +9,4 @@ config_*.json
 /resource/
 *.mdb
 *.accdb
+SupportStats.xlsx
