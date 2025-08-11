@@ -767,16 +767,26 @@ class DatabaseStore:
                     )
                 conn.execute(self.week_reporting.insert(), rows)
 
+        is_access = self.engine.dialect.name == "access"
+        lower_func = "LCase" if is_access else "LOWER"
+        is_junk_expr = (
+            f"IIF({lower_func}(jt.status) = 'cancelled', 1, 0)"
+            if is_access
+            else f"CASE WHEN {lower_func}(jt.status) = 'cancelled' THEN 1 ELSE 0 END"
+        )
+        request_type_expr = (
+            "IIF(jt.request_type LIKE '%Hardware%', 'HW', 'SW')"
+            if is_access
+            else "CASE WHEN jt.request_type LIKE '%Hardware%' THEN 'HW' ELSE 'SW' END"
+        )
+
         # create a view exposing reporting month and quarter columns
-        view_sql = """
+        view_sql = f"""
             CREATE VIEW jira_tickets_reporting AS
             SELECT
                 jt.*,
-                CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
-                CASE
-                    WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
-                    ELSE 'SW'
-                END AS request_type_category,
+                {is_junk_expr} AS is_junk,
+                {request_type_expr} AS request_type_category,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingmonth,
                 (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingquarter,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.resolved_week) AS resolved_reportingmonth,
@@ -793,11 +803,11 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "jira_tickets_reporting")
             conn.execute(text(view_sql))
 
-        worklog_view_sql = """
+        worklog_view_sql = f"""
             CREATE VIEW jira_worklogs_reporting AS
             SELECT
                 jw.*,
-                CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
+                {is_junk_expr} AS is_junk,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jw.started_week) AS started_reportingmonth,
                 (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jw.started_week) AS started_reportingquarter,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jw.created_week) AS created_reportingmonth,
@@ -809,7 +819,7 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "jira_worklogs_reporting")
             conn.execute(text(worklog_view_sql))
 
-        calendar_view_sql = """
+        calendar_view_sql = f"""
             CREATE VIEW jira_calendar_reporting AS
             SELECT
                 jc.record_id,
@@ -839,7 +849,7 @@ class DatabaseStore:
                 jc.weekdays_days_since_last_contact,
                 jc.adjusted_resolution_days,
                 jc.adjusted_resolution_weekdays,
-                CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
+                {is_junk_expr} AS is_junk,
                 jc.cw,
                 jc.weekday,
                 jc.date_modified,
@@ -852,15 +862,12 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "jira_calendar_reporting")
             conn.execute(text(calendar_view_sql))
 
-        activeweeks_view_sql = """
+        activeweeks_view_sql = f"""
             CREATE VIEW jira_tickets_active_weeks AS
             SELECT
                 jt.*,
-                CASE
-                    WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
-                    ELSE 'SW'
-                END AS request_type_category,
-                CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
+                {request_type_expr} AS request_type_category,
+                {is_junk_expr} AS is_junk,
                 aw.value AS active_week,
                 wr.reporting_month AS active_reportingmonth,
                 wr.reporting_quarter AS active_reportingquarter
@@ -873,15 +880,12 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "jira_tickets_active_weeks")
             conn.execute(text(activeweeks_view_sql))
 
-        ticket_worklogs_view_sql = """
+        ticket_worklogs_view_sql = f"""
             CREATE VIEW jira_tickets_worklogs AS
             SELECT
                 jt.*,
-                CASE
-                    WHEN jt.request_type LIKE '%Hardware%' THEN 'HW'
-                    ELSE 'SW'
-                END AS request_type_category,
-                CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END AS is_junk,
+                {request_type_expr} AS request_type_category,
+                {is_junk_expr} AS is_junk,
                 jw.*
             FROM jira_tickets jt
             LEFT JOIN jira_worklogs jw ON jt.id = jw.ticket_id
