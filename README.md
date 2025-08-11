@@ -1,6 +1,6 @@
 # SupportStatsGetter
 
-This project collects ticket statistics from **Jira Service Management** and stores them in a normalized Access database by default. A SQLite database can be used for regression tests. The code originated from the old `TeamSupportStatsGetter.py` script but no longer supports TeamSupport.
+This project collects ticket statistics from **Jira Service Management** and stores them in a normalized SQLite database. The code originated from the old `TeamSupportStatsGetter.py` script but no longer supports TeamSupport.
 
 ## Usage
 
@@ -10,7 +10,7 @@ This project collects ticket statistics from **Jira Service Management** and sto
   "jira_base_url": "https://example.atlassian.net",
   "jira_user": "your-email@example.com",
   "jira_token": "api-token",
-  "db_path": "support_stats.accdb",
+  "db_path": "support_stats.sqlite",
   "base_jql": "project = DEMO",
   "log_level": "INFO",
   "log_file": "support_stats.log",
@@ -30,8 +30,8 @@ pip install -r requirements.txt
 ```bash
 python SupportStatsGetter.py --config config.json --log-level DEBUG
 ```
-Fetched tickets will be stored in the Access database specified in the config file. Pass `--sqlite` to use SQLite instead.
-When using SQLite, `--output-excel [filename]` writes all database views to an Excel
+Fetched tickets will be stored in the SQLite database specified in the config file.
+The option `--output-excel [filename]` writes all database views to an Excel
 workbook. If no filename is provided the file `SupportStats.xlsx` is created.
 Subsequent runs only request tickets updated after the newest record already stored.
 Comments and worklogs for each ticket are downloaded and saved alongside the tickets.
@@ -92,11 +92,11 @@ Daily statistics for each ticket are stored in the `jira_calendar` table. Column
 ## Importing legacy TeamSupport data
 
 Historic exports from the former TeamSupport system can be loaded into the same
-Access database used for Jira data. The repository provides a dedicated helper
-script for this purpose (use `--sqlite` to import into a SQLite database):
+SQLite database used for Jira data. The repository provides a dedicated helper
+script for this purpose:
 
 ```bash
-python scripts/import_teamsupport.py --db path/to/db.accdb --input resource/reduced_tickets.json
+python scripts/import_teamsupport.py --db path/to/db.sqlite --input resource/reduced_tickets.json
 ```
 
 The importer reads the provided JSON file and inserts tickets, comments,

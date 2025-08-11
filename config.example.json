@@ -2,7 +2,7 @@
   "jira_base_url": "https://example.atlassian.net",
   "jira_user": "your-email@example.com",
   "jira_token": "api-token",
-  "db_path": "support_stats.accdb",
+  "db_path": "support_stats.sqlite",
   "base_jql": "project = DEMO",
   "log_level": "INFO",
   "log_file": "support_stats.log",
