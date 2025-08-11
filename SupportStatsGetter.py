@@ -78,6 +78,7 @@ import requests
 import dateutil.parser
 import pytz
 import pyodbc
+import pandas as pd
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, DateTime, Boolean,
     Integer, Float, Text, ForeignKey, select, func, text, delete,
@@ -1443,6 +1444,19 @@ class SupportStatsGetter:
         return self.store.newest_updated_ts()
 
     @log_call
+    def export_views_to_excel(self, output_file: Path) -> None:
+        """Write all database views into an Excel workbook."""
+        inspector = sa_inspect(self.store.engine)
+        views = inspector.get_view_names()
+        output_file = Path(output_file)
+        with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+            for view in views:
+                df = pd.read_sql_query(f"SELECT * FROM {view}", self.store.engine)
+                for col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="ignore")
+                df.to_excel(writer, sheet_name=view[:31], index=False)
+
+    @log_call
     def recalculate_all(self) -> None:
         """Recalculate KPI and mapped fields for all stored tickets."""
         with self.store.engine.connect() as conn:
@@ -1912,6 +1926,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Recalculate KPI fields for all stored tickets",
     )
+    parser.add_argument(
+        "--output-excel",
+        nargs="?",
+        const="SupportStats.xlsx",
+        default=None,
+        help="Export all views to an Excel workbook (SQLite only). If filename is omitted, uses 'SupportStats.xlsx'.",
+    )
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -1967,3 +1988,9 @@ if __name__ == "__main__":
             logging.exception("Failed to fetch or store Jira data")
     else:
         logging.error("Jira configuration missing in config file.")
+
+    if args.output_excel:
+        if not args.sqlite:
+            logging.error("--output-excel requires --sqlite")
+        else:
+            getter.export_views_to_excel(Path(args.output_excel))
