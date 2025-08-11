@@ -946,22 +946,8 @@ class DatabaseStore:
                     SELECT
                         wr.{period_col} AS period,
                         AVG(fw.overall_open) AS overall_open,
-                        (
-                            SELECT fw2.aged_30
-                            FROM friday_week fw2
-                            JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
-                            WHERE wr2.{period_col} = wr.{period_col}
-                            ORDER BY fw2.cw DESC
-                            LIMIT 1
-                        ) AS aged_30,
-                        (
-                            SELECT fw2.aged_5
-                            FROM friday_week fw2
-                            JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
-                            WHERE wr2.{period_col} = wr.{period_col}
-                            ORDER BY fw2.cw DESC
-                            LIMIT 1
-                        ) AS aged_5,
+                        ({aged_30_subquery}) AS aged_30,
+                        ({aged_5_subquery}) AS aged_5,
                         AVG(fw.unassigned) AS unassigned,
                         AVG(fw.over5_no_contact) AS over5_no_contact
                     FROM friday_week fw
@@ -1077,11 +1063,46 @@ class DatabaseStore:
         """
 
         def build_summary_view_sql(view_name: str, period_col: str, select_cols: str) -> str:
+            if is_access:
+                aged_30_subquery = f"""
+                    SELECT TOP 1 fw2.aged_30
+                    FROM friday_week fw2
+                    JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
+                    WHERE wr2.{period_col} = wr.{period_col}
+                    ORDER BY fw2.cw DESC
+                """
+                aged_5_subquery = f"""
+                    SELECT TOP 1 fw2.aged_5
+                    FROM friday_week fw2
+                    JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
+                    WHERE wr2.{period_col} = wr.{period_col}
+                    ORDER BY fw2.cw DESC
+                """
+            else:
+                aged_30_subquery = f"""
+                    SELECT fw2.aged_30
+                    FROM friday_week fw2
+                    JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
+                    WHERE wr2.{period_col} = wr.{period_col}
+                    ORDER BY fw2.cw DESC
+                    LIMIT 1
+                """
+                aged_5_subquery = f"""
+                    SELECT fw2.aged_5
+                    FROM friday_week fw2
+                    JOIN week_reporting wr2 ON wr2.calendar_week = fw2.cw
+                    WHERE wr2.{period_col} = wr.{period_col}
+                    ORDER BY fw2.cw DESC
+                    LIMIT 1
+                """
+
             return summary_view_template.format(
                 view_name=view_name,
                 period_col=period_col,
                 select_cols=select_cols,
                 statuses=statuses,
+                aged_30_subquery=aged_30_subquery,
+                aged_5_subquery=aged_5_subquery,
             )
 
         weekly_report_view_sql = build_summary_view_sql(
