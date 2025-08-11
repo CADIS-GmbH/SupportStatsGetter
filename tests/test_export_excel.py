@@ -11,7 +11,7 @@ from SupportStatsGetter import Config, SupportStatsGetter
 
 def test_export_views_writes_numbers(tmp_path):
     config = Config(db_path=tmp_path / "test.db")
-    getter = SupportStatsGetter(config, use_sqlite=True)
+    getter = SupportStatsGetter(config)
     with getter.store.engine.begin() as conn:
         conn.execute(text("CREATE VIEW test_view AS SELECT 42 AS value"))
     output = tmp_path / "out.xlsx"

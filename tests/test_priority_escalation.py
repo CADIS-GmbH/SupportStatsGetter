@@ -12,7 +12,7 @@ from scripts.import_teamsupport import map_history
 
 def test_recalculate_all_preserves_priority_escalation(tmp_path):
     config = Config(db_path=tmp_path / "test.db")
-    getter = SupportStatsGetter(config, use_sqlite=True)
+    getter = SupportStatsGetter(config)
 
     ticket_id = "T-1"
     created = datetime.datetime(2023, 1, 1, 0, 0)
@@ -117,7 +117,7 @@ def test_recalculate_all_preserves_priority_escalation(tmp_path):
 
 def test_recalculate_all_detects_priority_escalation_from_history(tmp_path):
     config = Config(db_path=tmp_path / "test.db")
-    getter = SupportStatsGetter(config, use_sqlite=True)
+    getter = SupportStatsGetter(config)
 
     ticket_id = "T-1"
     created = datetime.datetime(2023, 1, 1, 0, 0)
