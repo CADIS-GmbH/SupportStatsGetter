@@ -1136,9 +1136,12 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "weekly_support_summary")
             self._drop_view_if_exists(conn, "monthly_support_summary")
             self._drop_view_if_exists(conn, "quarterly_support_summary")
-            conn.execute(text(weekly_report_view_sql))
-            conn.execute(text(monthly_report_view_sql))
-            conn.execute(text(quarterly_report_view_sql))
+            # Microsoft Access has limited SQL support and cannot create these complex
+            # summary views. Skip view creation when using the Access backend.
+            if not is_access:
+                conn.execute(text(weekly_report_view_sql))
+                conn.execute(text(monthly_report_view_sql))
+                conn.execute(text(quarterly_report_view_sql))
 
         inspector = sa_inspect(self.engine)
         cols = [c["name"] for c in inspector.get_columns("jira_tickets")]
