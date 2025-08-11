@@ -1359,7 +1359,8 @@ class SupportStatsGetter:
             for view in views:
                 df = pd.read_sql_query(f"SELECT * FROM {view}", self.store.engine)
                 for col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="ignore")
+                    if not re.search(r"(week|month|quarter|cw)", col, re.IGNORECASE):
+                        df[col] = pd.to_numeric(df[col], errors="ignore")
                 df.to_excel(writer, sheet_name=view[:31], index=False)
 
     @log_call
