@@ -582,10 +582,19 @@ class DatabaseStore:
         Microsoft Access does not support the ``DROP VIEW IF EXISTS`` syntax.
         To maintain compatibility across different backends we inspect the
         connection for existing views and drop the view explicitly if present.
+
+        Additionally, executing raw ``DROP VIEW`` statements through the
+        Access ODBC driver raises a ``ProgrammingError``.  The driver expects
+        ``DROP TABLE`` to remove query objects instead of the standard
+        ``DROP VIEW`` syntax.  We therefore switch to ``DROP TABLE`` when the
+        underlying SQLAlchemy dialect is Access.
         """
         inspector = sa_inspect(conn)
         if view_name in inspector.get_view_names():
-            conn.execute(text(f"DROP VIEW {view_name}"))
+            if conn.dialect.name == "access":
+                conn.execute(text(f"DROP TABLE {view_name}"))
+            else:
+                conn.execute(text(f"DROP VIEW {view_name}"))
 
     @log_call
     def _prepare_schema(self) -> None:
