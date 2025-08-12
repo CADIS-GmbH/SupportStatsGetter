@@ -745,6 +745,9 @@ class DatabaseStore:
                     )
                 conn.execute(self.week_reporting.insert(), rows)
 
+            self._drop_view_if_exists(conn, "reporting_weeks")
+            conn.execute(text("CREATE VIEW reporting_weeks AS SELECT * FROM week_reporting"))
+
         is_junk_expr = "CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END"
         request_type_expr = "CASE WHEN jt.request_type LIKE '%Hardware%' THEN 'HW' ELSE 'SW' END"
 
