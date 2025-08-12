@@ -986,8 +986,8 @@ class DatabaseStore:
                 median_fr.median_first_reply AS median_first_reply_minutes,
                 closed.avg_resolution_days AS avg_resolution_days,
                 CASE WHEN newt.new_tickets IS NULL OR newt.new_tickets = 0 THEN NULL
-                     ELSE ROUND(100.0 * closed.closed_tickets / newt.new_tickets, 2)
-                END AS close_rate_percent,
+                     ELSE ROUND(1.0 * closed.closed_tickets / newt.new_tickets, 2)
+                END AS close_rate,
                 closed.csat_score AS csat_score,
                 COALESCE(closed.csat_answers, 0) AS csat_answers,
                 COALESCE(closed.csat_1, 0) AS csat_1,
