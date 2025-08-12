@@ -50,3 +50,16 @@ def test_export_views_escapes_formulas(tmp_path):
     assert cell.value == "'=2+2"  # prefixed with apostrophe
     assert cell.data_type == "s"
 
+
+def test_reporting_weeks_view_exported(tmp_path):
+    config = Config(db_path=tmp_path / "test.db")
+    getter = SupportStatsGetter(config)
+    output = tmp_path / "out.xlsx"
+    getter.export_views_to_excel(output)
+    wb = load_workbook(output)
+    assert "reporting_weeks" in wb.sheetnames
+    ws = wb["reporting_weeks"]
+    assert ws["A2"].value == "2025.01"
+    assert ws["B2"].value == "2025.01"
+    assert ws["C2"].value == "2025.Q1"
+
