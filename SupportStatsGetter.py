@@ -1361,6 +1361,9 @@ class SupportStatsGetter:
                 for col in df.columns:
                     if not re.search(r"(week|month|quarter|cw)", col, re.IGNORECASE):
                         df[col] = pd.to_numeric(df[col], errors="ignore")
+                    df[col] = df[col].apply(
+                        lambda v: f"'{v}" if isinstance(v, str) and v.startswith("=") else v
+                    )
                 df.to_excel(writer, sheet_name=view[:31], index=False)
 
     @log_call
