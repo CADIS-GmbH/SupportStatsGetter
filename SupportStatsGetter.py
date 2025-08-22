@@ -1363,7 +1363,10 @@ class SupportStatsGetter:
                 df = pd.read_sql_query(f"SELECT * FROM {view}", self.store.engine)
                 for col in df.columns:
                     if not re.search(r"(week|month|quarter|cw)", col, re.IGNORECASE):
-                        df[col] = pd.to_numeric(df[col], errors="ignore")
+                        try:
+                            df[col] = pd.to_numeric(df[col])
+                        except (ValueError, TypeError):
+                            pass
                     df[col] = df[col].apply(
                         lambda v: f"'{v}" if isinstance(v, str) and v.startswith("=") else v
                     )
@@ -1590,15 +1593,15 @@ class SupportStatsGetter:
         all_issues: list[dict[str, Any]] = []
 
         while True:
-            params = {
+            payload = {
                 "jql": final_jql,
                 "maxResults": max_results,
                 "startAt": start_at,
             }
-            logging.getLogger(__name__).info(f"GET {url} params={params}")
-            r = requests.get(
+            logging.getLogger(__name__).info(f"POST {url} json={payload}")
+            r = requests.post(
                 url,
-                params=params,
+                json=payload,
                 auth=self._jira_auth(),
                 headers={"Accept": "application/json"},
             )
