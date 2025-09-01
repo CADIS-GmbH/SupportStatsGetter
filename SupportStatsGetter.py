@@ -1587,18 +1587,18 @@ class SupportStatsGetter:
             parts.append(f"updated >= \"{ts}\"")
         final_jql = " AND ".join(parts)
 
-        url = f"{self.config.jira_base_url}/rest/api/3/jql/search"
-        start_at = 0
+        url = f"{self.config.jira_base_url}/rest/api/3/search/jql"
+        next_page_token: str | None = None
         max_results = 50
         all_issues: list[dict[str, Any]] = []
 
         while True:
-            payload = {
+            payload: dict[str, Any] = {
                 "jql": final_jql,
-                "query": final_jql,
                 "maxResults": max_results,
-                "startAt": start_at,
             }
+            if next_page_token:
+                payload["nextPageToken"] = next_page_token
             logging.getLogger(__name__).info(f"POST {url} json={payload}")
             r = requests.post(
                 url,
@@ -1611,15 +1611,16 @@ class SupportStatsGetter:
 
             # The new search API nests issues under "results".
             issues = data.get("issues")
-            total = data.get("total")
+            next_page_token = data.get("nextPageToken")
             if issues is None:
                 results = data.get("results", [])
                 if results:
-                    issues = results[0].get("issues", [])
-                    total = results[0].get("total", len(issues))
+                    first = results[0]
+                    issues = first.get("issues", [])
+                    next_page_token = first.get("nextPageToken")
                 else:
                     issues = []
-                    total = 0
+                    next_page_token = None
             for issue in issues:
                 fields = issue.get("fields", {})
                 issue["created"] = self._parse_ts(fields.get("created"))
@@ -1627,9 +1628,8 @@ class SupportStatsGetter:
                 issue["updated"] = self._parse_ts(fields.get("updated"))
             all_issues.extend(issues)
 
-            if start_at + len(issues) >= total or not issues:
+            if not next_page_token or not issues:
                 break
-            start_at += len(issues)
 
         return all_issues
 
