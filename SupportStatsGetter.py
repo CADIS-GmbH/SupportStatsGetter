@@ -1587,7 +1587,7 @@ class SupportStatsGetter:
             parts.append(f"updated >= \"{ts}\"")
         final_jql = " AND ".join(parts)
 
-        url = f"{self.config.jira_base_url}/rest/api/3/search"
+        url = f"{self.config.jira_base_url}/rest/api/3/jql/search"
         start_at = 0
         max_results = 50
         all_issues: list[dict[str, Any]] = []
@@ -1595,6 +1595,7 @@ class SupportStatsGetter:
         while True:
             payload = {
                 "jql": final_jql,
+                "query": final_jql,
                 "maxResults": max_results,
                 "startAt": start_at,
             }
@@ -1607,7 +1608,18 @@ class SupportStatsGetter:
             )
             r.raise_for_status()
             data = r.json()
-            issues = data.get("issues", [])
+
+            # The new search API nests issues under "results".
+            issues = data.get("issues")
+            total = data.get("total")
+            if issues is None:
+                results = data.get("results", [])
+                if results:
+                    issues = results[0].get("issues", [])
+                    total = results[0].get("total", len(issues))
+                else:
+                    issues = []
+                    total = 0
             for issue in issues:
                 fields = issue.get("fields", {})
                 issue["created"] = self._parse_ts(fields.get("created"))
@@ -1615,7 +1627,6 @@ class SupportStatsGetter:
                 issue["updated"] = self._parse_ts(fields.get("updated"))
             all_issues.extend(issues)
 
-            total = data.get("total", 0)
             if start_at + len(issues) >= total or not issues:
                 break
             start_at += len(issues)
