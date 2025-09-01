@@ -1596,6 +1596,7 @@ class SupportStatsGetter:
             payload: dict[str, Any] = {
                 "jql": final_jql,
                 "maxResults": max_results,
+                "fields": ["*all"],
             }
             if next_page_token:
                 payload["nextPageToken"] = next_page_token
