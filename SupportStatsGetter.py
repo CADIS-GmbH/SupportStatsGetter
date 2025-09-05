@@ -410,11 +410,12 @@ def make_jira_ticket_calendar(
         lbls: list[str] = list(fields.get("labels") or [])
         priority = (fields.get("priority") or {}).get("name") or ""
         prio_pos = PRIORITY_POS_MAP.get(priority, 0)
-        req_type = (
+        req_type_raw = (
             fields.get("requestType")
             or fields.get("request_type")
             or fields.get(request_type_field or "")
         )
+        req_type = SupportStatsGetter._simple_value(req_type_raw)
         issue_cat = issue_category_map.get(req_type) if req_type else None
 
         histories = sorted(
@@ -442,7 +443,7 @@ def make_jira_ticket_calendar(
                     priority = str(prev_val)
                     prio_pos = PRIORITY_POS_MAP.get(priority, 0)
                 elif field in {req_field_lower, "request type"}:
-                    req_type = str(prev_val)
+                    req_type = SupportStatsGetter._simple_value(prev_val)
                     issue_cat = issue_category_map.get(req_type) if req_type else None
 
         return (
