@@ -10,7 +10,8 @@
     "request_type": "customfield_10010",
     "deployment_type": "customfield_10011",
     "satisfaction": "customfield_10012",
-    "satisfaction_ts": "customfield_10013"
+    "satisfaction_ts": "customfield_10013",
+    "request_participants": "customfield_10014"
   },
   "issue_category_map": {
     "Support": "support",

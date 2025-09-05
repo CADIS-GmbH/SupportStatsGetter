@@ -621,6 +621,7 @@ class DatabaseStore:
             Column("assignee_email", String),
             Column("creator", String),
             Column("creator_email", String),
+            Column("request_participants", Text),
             Column("labels", Text),
             Column("priority", String),
             Column("priority_pos", Integer),
@@ -1140,6 +1141,9 @@ class DatabaseStore:
         if "creator_email" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN creator_email VARCHAR"))
+        if "request_participants" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN request_participants TEXT"))
         if "labels" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN labels TEXT"))
@@ -1721,6 +1725,18 @@ class SupportStatsGetter:
             issue_cat = (
                 self.config.issue_category_map.get(req_type) if req_type else None
             )
+            participants = self._field_value(
+                fields, "request_participants", ["requestParticipants"]
+            )
+            participants_csv = ",".join(
+                [
+                    p.get("emailAddress")
+                    or p.get("displayName")
+                    or p.get("name")
+                    or str(p)
+                    for p in (participants or [])
+                ]
+            )
             records.append(
                 {
                     "id": issue["id"],
@@ -1731,6 +1747,7 @@ class SupportStatsGetter:
                     "assignee_email": (fields.get("assignee") or {}).get("emailAddress"),
                     "creator": (fields.get("creator") or {}).get("displayName"),
                     "creator_email": (fields.get("creator") or {}).get("emailAddress"),
+                    "request_participants": participants_csv,
                     "labels": ",".join(fields.get("labels") or []),
                     "priority": prio_txt,
                     "priority_pos": prio_pos,
