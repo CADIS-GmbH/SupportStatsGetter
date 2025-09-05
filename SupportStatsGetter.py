@@ -132,6 +132,7 @@ class Config:
     log_level: str = "INFO"
     log_file: Path = Path("support_stats.log")
     custom_fields: dict[str, str] = field(default_factory=dict)
+    issue_category_map: dict[str, str] = field(default_factory=dict)
 
     @staticmethod
     @log_call
@@ -147,6 +148,7 @@ class Config:
             log_level=data.get("log_level", "INFO"),
             log_file=Path(data.get("log_file", "support_stats.log")),
             custom_fields=data.get("custom_fields", {}),
+            issue_category_map=data.get("issue_category_map", {}),
         )
 
 
@@ -165,6 +167,10 @@ class JiraCalendarRecord:
     end_assigned_user: str | None = None
     start_assigned_user_email: str | None = None
     end_assigned_user_email: str | None = None
+    start_request_type: str | None = None
+    end_request_type: str | None = None
+    start_issue_category: str | None = None
+    end_issue_category: str | None = None
     did_escalate_priority: bool = False
     did_escalate_cs: bool = False
     did_escalate_management: bool = False
@@ -367,8 +373,13 @@ def make_jira_ticket_calendar(
     comments: list[dict[str, Any]],
     worklogs: list[dict[str, Any]],
     changelog: list[dict[str, Any]],
+    issue_category_map: Mapping[str, str] | None = None,
+    request_type_field: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return per-day statistics for a Jira issue."""
+
+    req_field_lower = (request_type_field or "request type").lower()
+    issue_category_map = issue_category_map or {}
 
     created = issue.get("created")
     if not created:
@@ -388,6 +399,8 @@ def make_jira_ticket_calendar(
         str,
         str,
         int,
+        str | None,
+        str | None,
     ]:
         """Reconstruct field values at ticket creation from the changelog."""
 
@@ -397,6 +410,12 @@ def make_jira_ticket_calendar(
         lbls: list[str] = list(fields.get("labels") or [])
         priority = (fields.get("priority") or {}).get("name") or ""
         prio_pos = PRIORITY_POS_MAP.get(priority, 0)
+        req_type = (
+            fields.get("requestType")
+            or fields.get("request_type")
+            or fields.get(request_type_field or "")
+        )
+        issue_cat = issue_category_map.get(req_type) if req_type else None
 
         histories = sorted(
             changelog, key=lambda h: h.get("created") or datetime.datetime.min, reverse=True
@@ -422,8 +441,21 @@ def make_jira_ticket_calendar(
                 elif field == "priority":
                     priority = str(prev_val)
                     prio_pos = PRIORITY_POS_MAP.get(priority, 0)
+                elif field in {req_field_lower, "request type"}:
+                    req_type = str(prev_val)
+                    issue_cat = issue_category_map.get(req_type) if req_type else None
 
-        return status, user, user_email, lbls, group_from_labels(lbls), priority, prio_pos
+        return (
+            status,
+            user,
+            user_email,
+            lbls,
+            group_from_labels(lbls),
+            priority,
+            prio_pos,
+            req_type,
+            issue_cat,
+        )
 
     (
         start_status,
@@ -433,6 +465,8 @@ def make_jira_ticket_calendar(
         assigned_group,
         priority_txt,
         priority_pos,
+        request_type,
+        issue_category,
     ) = derive_initial_state()
 
     adjusted_days = 0
@@ -469,6 +503,8 @@ def make_jira_ticket_calendar(
         day_start_group = assigned_group
         day_start_priority_txt = priority_txt
         day_start_priority_pos = priority_pos
+        day_start_request_type = request_type
+        day_start_issue_category = issue_category
 
         while idx < len(events) and events[idx][0].date() == cur:
             ts, etype, data = events[idx]
@@ -500,6 +536,9 @@ def make_jira_ticket_calendar(
                     elif field and field.lower() == "labels":
                         labels = [l.strip() for l in (to_string or "").split(",") if l.strip()]
                         assigned_group = group_from_labels(labels) or assigned_group
+                    elif field and field.lower() in {req_field_lower, "request type"}:
+                        request_type = to_string or request_type
+                        issue_category = issue_category_map.get(request_type) if request_type else issue_category
             idx += 1
 
         record = JiraCalendarRecord(
@@ -519,6 +558,10 @@ def make_jira_ticket_calendar(
             start_priority_pos=day_start_priority_pos,
             end_priority_txt=priority_txt,
             end_priority_pos=priority_pos,
+            start_request_type=day_start_request_type,
+            end_request_type=request_type,
+            start_issue_category=day_start_issue_category,
+            end_issue_category=issue_category,
             start_status=day_start_status,
             end_status=start_status,
             time_spent_min=day_time,
@@ -595,6 +638,7 @@ class DatabaseStore:
             Column("first_response_time_minutes", Integer),
             Column("resolution_time_days", Float),
             Column("request_type", String),
+            Column("issue_category", String),
             Column("deployment_type", String),
             Column("organizations", Text),
             Column("primary_organization", String),
@@ -664,6 +708,10 @@ class DatabaseStore:
             Column("end_assigned_user", String),
             Column("start_assigned_user_email", String),
             Column("end_assigned_user_email", String),
+            Column("start_request_type", String),
+            Column("end_request_type", String),
+            Column("start_issue_category", String),
+            Column("end_issue_category", String),
             Column("did_escalate_priority", Boolean),
             Column("did_escalate_cs", Boolean),
             Column("did_escalate_management", Boolean),
@@ -805,6 +853,10 @@ class DatabaseStore:
                 jc.end_assigned_user,
                 jc.start_assigned_user_email,
                 jc.end_assigned_user_email,
+                jc.start_request_type,
+                jc.end_request_type,
+                jc.start_issue_category,
+                jc.end_issue_category,
                 jc.did_escalate_priority,
                 jc.did_escalate_cs,
                 jc.did_escalate_management,
@@ -1130,6 +1182,9 @@ class DatabaseStore:
         if "request_type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN request_type VARCHAR"))
+        if "issue_category" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN issue_category VARCHAR"))
         if "deployment_type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN deployment_type VARCHAR"))
@@ -1162,6 +1217,18 @@ class DatabaseStore:
         if "end_assigned_user_email" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_assigned_user_email VARCHAR"))
+        if "start_request_type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN start_request_type VARCHAR"))
+        if "end_request_type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_request_type VARCHAR"))
+        if "start_issue_category" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN start_issue_category VARCHAR"))
+        if "end_issue_category" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_issue_category VARCHAR"))
 
         cols = [c["name"] for c in inspector.get_columns("jira_comments")]
         if "public" not in cols:
@@ -1450,7 +1517,12 @@ class SupportStatsGetter:
             processed_issue = calculate_kpi_fields(issue, updated_comments, changelog)
             self.store_jira_tickets([processed_issue])
             calendar_rows = make_jira_ticket_calendar(
-                processed_issue, updated_comments, worklogs, changelog
+                processed_issue,
+                updated_comments,
+                worklogs,
+                changelog,
+                self.config.issue_category_map,
+                self.config.custom_fields.get("request_type"),
             )
             with self.store.engine.begin() as conn:
                 conn.execute(
@@ -1643,6 +1715,12 @@ class SupportStatsGetter:
             prio_pos = PRIORITY_POS_MAP.get(prio_txt, 0)
             sat_field = self._field_value(fields, "satisfaction", ["satisfaction"])
             sat_ts_field = self._field_value(fields, "satisfaction_ts", ["satisfaction_ts"])
+            req_type = self._simple_value(
+                self._field_value(fields, "request_type", ["requestType"])
+            )
+            issue_cat = (
+                self.config.issue_category_map.get(req_type) if req_type else None
+            )
             records.append(
                 {
                     "id": issue["id"],
@@ -1656,9 +1734,8 @@ class SupportStatsGetter:
                     "labels": ",".join(fields.get("labels") or []),
                     "priority": prio_txt,
                     "priority_pos": prio_pos,
-                    "request_type": self._simple_value(
-                        self._field_value(fields, "request_type", ["requestType"])
-                    ),
+                    "request_type": req_type,
+                    "issue_category": issue_cat,
                     "deployment_type": self._simple_value(
                         self._field_value(fields, "deployment_type", ["Deployment type"])
                     ),
@@ -1890,7 +1967,14 @@ if __name__ == "__main__":
                 getter.store_jira_worklogs(issue["id"], worklogs)
                 getter.store_jira_changelog(issue["id"], changelog)
 
-                calendar_rows = make_jira_ticket_calendar(issue, comments, worklogs, changelog)
+                calendar_rows = make_jira_ticket_calendar(
+                    issue,
+                    comments,
+                    worklogs,
+                    changelog,
+                    getter.config.issue_category_map,
+                    getter.config.custom_fields.get("request_type"),
+                )
                 getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
                 calendar_total += len(calendar_rows)
 

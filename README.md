@@ -19,6 +19,11 @@ This project collects ticket statistics from **Jira Service Management** and sto
     "deployment_type": "customfield_10011",
     "satisfaction": "customfield_10012",
     "satisfaction_ts": "customfield_10013"
+  },
+  "issue_category_map": {
+    "Support": "support",
+    "Service": "service",
+    "Problem": "problem"
   }
 }
 ```
