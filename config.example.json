@@ -1,0 +1,21 @@
+{
+  "jira_base_url": "https://example.atlassian.net",
+  "jira_user": "your-email@example.com",
+  "jira_token": "api-token",
+  "db_path": "support_stats.sqlite",
+  "base_jql": "project = DEMO",
+  "log_level": "INFO",
+  "log_file": "support_stats.log",
+  "custom_fields": {
+    "request_type": "customfield_10010",
+    "deployment_type": "customfield_10011",
+    "satisfaction": "customfield_10012",
+    "satisfaction_ts": "customfield_10013",
+    "request_participants": "customfield_10014"
+  },
+  "issue_category_map": {
+    "Support": "support",
+    "Service": "service",
+    "Problem": "problem"
+  }
+}

@@ -1,0 +1,7 @@
+requests
+python-dateutil
+pytz
+SQLAlchemy
+html2text
+pandas
+openpyxl

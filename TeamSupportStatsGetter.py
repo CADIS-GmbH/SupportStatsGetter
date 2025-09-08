@@ -15,6 +15,8 @@ import dateutil.parser
 import requests
 import html2text
 
+from cadis_bdk_contacts import CADIS_BDK_CONTACTS
+
 LOAD_INCREMENT_IN_DAYS = 14
 
 RETRY_INTERVAL_SECONDS = 60
@@ -27,7 +29,7 @@ GROUP_ASSIGN_RE = "Reassigned.*from group (?:&apos;|')(.*)(?:&apos;|') to group 
 USER_ASSIGN_RE = "Reassigned.*from user (?:&apos;|')(.*)(?:&apos;|') to user (?:&apos;|')(.*)(?:&apos;|')"
 SEVERITY_CHANGE_RE = "Changed severity from (?:&apos;|')(.*)(?:&apos;|') to (?:&apos;|')(.*)(?:&apos;|')"
 EMAIL_REPLY_RE = 'Changed status of ticket to (?:&quot;|")(.*)(?:&quot;|") since ticket was replied to via e-mail'
-EXCLUDE_BY_NAME_RES = ['\[RECOVERY\]']
+EXCLUDE_BY_NAME_RES = [r"\[RECOVERY\]"]
 
 KEEP_RAW_ACTION_TEXT = False # if true the text is kept in its raw state (MAX_ACTION_TEXT_LEN is ignored)
 GET_ATTACHEMNTS = False # download and save files
@@ -40,21 +42,6 @@ SEVERITY_POS_MAP = {
     "Medium": -1,
     "Low": -2
 }
-
-CADIS_BDK_CONTACTS = ["8790127", "8790128", "8790895", "8791279", "8791280", "8797827", "8798763", "8798771", "8798926",
-                      "8800441", "8800854", "8800888", "8802249", "8803187", "8811382", "8813605", "8815311", "8815831",
-                      "8815833", "8815836", "8826368", "8841417", "8844990", "8845236", "8845237", "8845238", "8845239",
-                      "8845240", "8845241", "8847004", "8848885", "8897991", "8897992", "8903601", "8909762", "8914466",
-                      "8939041", "8940674", "8941185", "8950821", "8951117", "8982859", "8982860", "8984369", "8984762",
-                      "8996257", "8997172", "8998682", "9014863", "9018003", "9043146", "9060305", "9072344", "9086850",
-                      "9086946", "9088537", "9094724", "9098139", "9110560", "9128352", "9137917", "9137918", "9139932",
-                      "9139933", "9237215", "9242335", "9337932", "9343750", "9348569", "9351896", "9351897", "9351898",
-                      "9355705", "9391124", "9399304", "9425069", "9428590", "9448458", "9449554", "9456935", "9458629",
-                      "9494191", "9504713", "9544218", "9545570", "9585090", "9605161", "9613309", "9707230", "9707233",
-                      "9829169", "9853151", "9856350", "8799323", "9575844", "8799317", "9132791", "9563940", "9769965",
-                      "8785940", "9831827", "9575852", "9831822", "8911198", "8785935", "9892277", "9575850", "9446502",
-                      "8785936", "9575845", "8800885", "8980870", "8785945", "9831815", "8785941", "8785938", "9446497",
-                      "8785944", "9892285", "9329216", "10519045"]
 
 
 
@@ -156,10 +143,10 @@ class StatisticsDayRecord:
     ticket_nr: str
     actions: int = 0
     public_actions: int = 0
-    start_assigned_group: str = "Unassigned"
-    end_assigned_group: str = "Unassigned"
-    start_assigned_user: str = "Unassigned"
-    end_assigned_user: str = "Unassigned"
+    start_assigned_group: str = ""
+    end_assigned_group: str = ""
+    start_assigned_user: str = ""
+    end_assigned_user: str = ""
     did_escalate_severity: bool = False
     did_escalate_cs: bool = False
     did_escalate_management: bool = False
@@ -229,6 +216,10 @@ class StatisticsDayRecord:
         elif m := re.match(GROUP_ASSIGN_RE, hist["Description"]):
             old_s = m.group(1)
             new_s = m.group(2)
+            if old_s.lower() == "unassigned":
+                old_s = ""
+            if new_s.lower() == "unassigned":
+                new_s = ""
             if (not self.end_assigned_group == old_s) and "1st" not in old_s:
                 print(
                     f"WARNING: Ticket #{self.ticket_nr} inconsistent history group assign  action. Ticket group "
@@ -241,6 +232,10 @@ class StatisticsDayRecord:
         elif m := re.match(USER_ASSIGN_RE, hist["Description"]):
             old_s = m.group(1)
             new_s = m.group(2)
+            if old_s.lower() == "unassigned":
+                old_s = ""
+            if new_s.lower() == "unassigned":
+                new_s = ""
             if not self.end_assigned_user == old_s:
                 print(
                     f"WARNING: Ticket #{self.ticket_nr} inconsistent history user assign action. "
@@ -385,7 +380,6 @@ def calculate_kpi_values(tickets):
 
         t["ActiveWeeks"] = __get_cws_active(t)
         t["CreatedWeek"] = cw_string_from_isodate(t["DateCreated"])
-        t["TicketSource"] = t["TicketSource"][0] if len(t["TicketSource"]) > 0 else None
         if (t["Status"].find("Closed") >= 0) and len(t["History"]) > 0:
             t["ResolvedDate"] = __extract_resolve_date(t["History"])
             t["ResolvedWeek"] = cw_string_from_isodate(t["ResolvedDate"])
@@ -440,6 +434,11 @@ def __reformat_record(r):
             r[k] = float(v)
     r = r | add_dict_values
 
+    if "CreatorID" in r:
+        r["internal_user"] = str(r.get("CreatorID")) in CADIS_BDK_CONTACTS
+    else:
+        r["internal_user"] = False
+
     return r
 
 
@@ -465,7 +464,7 @@ def __extract_first_response_date(actions: list):
         # action must be public (isVisible...) and be performed by and internal contact (in CADIS_BDK_CONTACTS) and
         # must not be the very first (i.e. create) action (k>0)
         if ((i["IsVisibleOnPortal"] == "True") >= 0) \
-                and (i["CreatorID"] in CADIS_BDK_CONTACTS) \
+                and (str(i.get("CreatorID")) in CADIS_BDK_CONTACTS) \
                 and k > 0:
             return i["DateCreated"]
         k += 1
@@ -484,7 +483,7 @@ def __extract_last_response_date(actions: list):
         # action must be public (isVisible...) and be performed by and internal contact (in CADIS_BDK_CONTACTS) and
         # must not be the very first (i.e. create) action (idx>0)
         if ((i["IsVisibleOnPortal"] == "True") >= 0) \
-                and (i["CreatorID"] in CADIS_BDK_CONTACTS) \
+                and (str(i.get("CreatorID")) in CADIS_BDK_CONTACTS) \
                 and idx > 0:
             return i["DateCreated"]
         idx -= 1
@@ -549,7 +548,27 @@ def make_ticket_calendar(t):
 
     calendar = []
     c_date = s_date_str
-    sdr = StatisticsDayRecord(ticket_id=t["ID"], ticket_nr=t["TicketNumber"], date=c_date)
+    init_group = (t.get("GroupName") or "").strip()
+    if init_group.lower() == "unassigned":
+        init_group = ""
+    init_user = (t.get("UserName") or "").strip()
+    if init_user.lower() == "unassigned":
+        init_user = ""
+    sdr = StatisticsDayRecord(
+        ticket_id=t["ID"],
+        ticket_nr=t["TicketNumber"],
+        date=c_date,
+        start_assigned_group=init_group,
+        end_assigned_group=init_group,
+        start_assigned_user=init_user,
+        end_assigned_user=init_user,
+        start_status=t.get("Status") or "New",
+        end_status=t.get("Status") or "New",
+        start_severity_txt=t.get("Severity") or "Normal",
+        end_severity_txt=t.get("Severity") or "Normal",
+        start_severity_pos=int(SEVERITY_POS_MAP.get(t.get("Severity"), 0)),
+        end_severity_pos=int(SEVERITY_POS_MAP.get(t.get("Severity"), 0)),
+    )
 
     while c_date <= e_date_str:
         for e in history_by_date.get(c_date, []):
@@ -645,16 +664,26 @@ def load_tickets(base_url: str, path: str, username: str, password, filter_param
                     print(f'Get attachemnts {act_url}')
 
                     try:
-                        response = requests.get(act_url, headers=h,  stream=True)  # Stream to avoid loading large files into memory
+                        response = requests.get(
+                            act_url,
+                            headers=h,
+                            stream=True,
+                        )  # Stream to avoid loading large files into memory
                         response.raise_for_status()  # Raise an error for bad responses (4xx and 5xx)
 
-                        save_path = f"{attachment_save_dir}/#{t["TicketNumber"]}_atmt_{atm_file["ID"]}_{atm_file["FileName"]}"
+                        save_path = (
+                            f"{attachment_save_dir}/#{t['TicketNumber']}_atmt_"
+                            f"{atm_file['ID']}_{atm_file['FileName']}"
+                        )
                         with open(save_path, 'wb') as file:
-                            for chunk in response.iter_content(chunk_size=8192):  # Read in chunks
+                            for chunk in response.iter_content(chunk_size=8192):
                                 file.write(chunk)
                             print(f"File downloaded successfully: {save_path}")
                     except Exception as e:
-                        print(f"WARNING: failed to write attachment #{t["TicketNumber"]}_atmt_{atm_file["ID"]}_{atm_file["FileName"]}: {str(e)}")
+                        print(
+                            f"WARNING: failed to write attachment #{t['TicketNumber']}_atmt_"
+                            f"{atm_file['ID']}_{atm_file['FileName']}: {str(e)}"
+                        )
 
 
         t["Calendar"] = make_ticket_calendar(t)
