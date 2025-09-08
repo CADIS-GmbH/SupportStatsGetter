@@ -1,21 +1,21 @@
 {
-  "jira_base_url": "https://example.atlassian.net",
-  "jira_user": "your-email@example.com",
-  "jira_token": "api-token",
-  "db_path": "support_stats.sqlite",
-  "base_jql": "project = DEMO",
+  "jira_base_url": "https://cadissoftware.atlassian.net",
+  "jira_user": "<you>>@cadissoftware.com",
+  "jira_token": "<your_token>>",
+  "db_path": "C:\\OneDrive - Valsoft Corporation\\Shared Documents - CAD - Cadis\\Customer Success\\Customer Service\\Support\\Statistics\\CADIS_JIRA_DATA\\support_stats.sqlite",
+  "base_jql": "project = \"CSM\"  ",
   "log_level": "INFO",
   "log_file": "support_stats.log",
   "custom_fields": {
     "request_type": "customfield_10010",
-    "deployment_type": "customfield_10011",
-    "satisfaction": "customfield_10012",
-    "satisfaction_ts": "customfield_10013",
-    "request_participants": "customfield_10014"
-  },
-  "issue_category_map": {
-    "Support": "support",
-    "Service": "service",
-    "Problem": "problem"
+    "deployment_type": "customfield_10661",
+    "organizations": "customfield_10002",
+    "satisfaction": "customfield_10060",
+    "satisfaction_ts": "customfield_10061",
+    "work_category": "customfield_10194",
+    "sentiment": "customfield_10162",
+    "time_to_close": "customfield_10695",
+    "time_to_qualified_answer": "customfield_10595",
+    "time_to_resolution": "customfield_10197"
   }
 }
