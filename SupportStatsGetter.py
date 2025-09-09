@@ -84,6 +84,7 @@ from sqlalchemy import (
     inspect as sa_inspect
 )
 from sqlalchemy.engine import Engine
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
 
 def log_call(func):
@@ -1471,20 +1472,26 @@ class SupportStatsGetter:
         total_views = len(views)
         logging.info("Exporting %d views to Excel workbook", total_views)
 
+        def sanitize_value(v: Any) -> Any:
+            if isinstance(v, str):
+                v = ILLEGAL_CHARACTERS_RE.sub("", v)
+                if v.startswith("="):
+                    v = f"'{v}"
+            return v
+
         with pd.ExcelWriter(output_file, **writer_kwargs) as writer:
             for idx, view in enumerate(views, start=1):
                 logging.info("Writing view %d/%d: %s", idx, total_views, view)
-                df = pd.read_sql_query(f"SELECT * FROM {view}", self.store.engine)
+                df = pd.read_sql_query(f'SELECT * FROM "{view}"', self.store.engine)
                 for col in df.columns:
                     if not re.search(r"(week|month|quarter|cw)", col, re.IGNORECASE):
                         try:
                             df[col] = pd.to_numeric(df[col])
                         except (ValueError, TypeError):
                             pass
-                    df[col] = df[col].apply(
-                        lambda v: f"'{v}" if isinstance(v, str) and v.startswith("=") else v
-                    )
-                df.to_excel(writer, sheet_name=view[:31], index=False)
+                    df[col] = df[col].apply(sanitize_value)
+                safe_name = re.sub(r'[/\\*?:\[\]]', '_', view)[:31]
+                df.to_excel(writer, sheet_name=safe_name, index=False)
 
         logging.info("Finished exporting Excel workbook to %s", output_file)
 
