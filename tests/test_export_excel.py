@@ -1,8 +1,9 @@
 import sys
 from pathlib import Path
 
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 from sqlalchemy import text
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -62,4 +63,40 @@ def test_reporting_weeks_view_exported(tmp_path):
     assert ws["A2"].value == "2025.01"
     assert ws["B2"].value == "2025.01"
     assert ws["C2"].value == "2025.Q1"
+
+
+def test_export_update_and_backup(tmp_path):
+    config = Config(db_path=tmp_path / "test.db")
+    getter = SupportStatsGetter(config)
+    with getter.store.engine.begin() as conn:
+        conn.execute(text("CREATE VIEW test_view AS SELECT 1 AS value"))
+    output = tmp_path / "out.xlsx"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "old_sheet"
+    ws["A1"] = "old"
+    wb.save(output)
+
+    getter.export_views_to_excel(output, mode="update_and_backup")
+
+    backups = list(tmp_path.glob("out_*.xlsx"))
+    assert backups
+
+    wb2 = load_workbook(output)
+    assert "old_sheet" in wb2.sheetnames
+    assert wb2["old_sheet"]["A1"].value == "old"
+    assert wb2["test_view"]["A2"].value == 1
+
+
+def test_export_no_overwrite(tmp_path):
+    config = Config(db_path=tmp_path / "test.db")
+    getter = SupportStatsGetter(config)
+    with getter.store.engine.begin() as conn:
+        conn.execute(text("CREATE VIEW test_view AS SELECT 1 AS value"))
+    output = tmp_path / "out.xlsx"
+    output.write_bytes(b"")
+
+    with pytest.raises(FileExistsError):
+        getter.export_views_to_excel(output, mode="no_overwrite")
 
