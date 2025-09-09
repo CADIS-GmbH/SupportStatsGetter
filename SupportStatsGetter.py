@@ -17,8 +17,9 @@ import json
 import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Pattern, Mapping
+from typing import Any, Iterable, Pattern, Mapping, Literal
 import re
+import shutil
 
 # Email patterns of internal agents used to detect response times. The patterns
 # are loaded from the ``internal_users`` table at runtime.
@@ -131,6 +132,10 @@ class Config:
     base_jql: str | None = None
     log_level: str = "INFO"
     log_file: Path = Path("support_stats.log")
+    output_excel: Path | None = None
+    excel_write_mode: Literal[
+        "overwrite", "no_overwrite", "update", "update_and_backup"
+    ] = "update_and_backup"
     custom_fields: dict[str, str] = field(default_factory=dict)
     issue_category_map: dict[str, str] = field(default_factory=dict)
 
@@ -147,6 +152,8 @@ class Config:
             base_jql=data.get("base_jql"),
             log_level=data.get("log_level", "INFO"),
             log_file=Path(data.get("log_file", "support_stats.log")),
+            output_excel=Path(data["output_excel"]) if data.get("output_excel") else None,
+            excel_write_mode=data.get("excel_write_mode", "update_and_backup"),
             custom_fields=data.get("custom_fields", {}),
             issue_category_map=data.get("issue_category_map", {}),
         )
@@ -1425,12 +1432,44 @@ class SupportStatsGetter:
         return self.store.newest_updated_ts()
 
     @log_call
-    def export_views_to_excel(self, output_file: Path) -> None:
-        """Write all database views into an Excel workbook."""
+    def export_views_to_excel(
+        self,
+        output_file: Path,
+        mode: Literal["overwrite", "no_overwrite", "update", "update_and_backup"] = "update_and_backup",
+    ) -> None:
+        """Write all database views into an Excel workbook.
+
+        Parameters
+        ----------
+        output_file:
+            Target workbook path.
+        mode:
+            Behaviour when the target file already exists.
+        """
         inspector = sa_inspect(self.store.engine)
         views = inspector.get_view_names()
         output_file = Path(output_file)
-        with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
+
+        writer_kwargs: dict[str, Any] = {"engine": "openpyxl"}
+        if mode == "overwrite":
+            writer_kwargs["mode"] = "w"
+        elif mode == "no_overwrite":
+            if output_file.exists():
+                raise FileExistsError(output_file)
+            writer_kwargs["mode"] = "w"
+        else:  # update or update_and_backup
+            if output_file.exists():
+                if mode == "update_and_backup":
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    backup = output_file.with_name(
+                        f"{output_file.stem}_{timestamp}{output_file.suffix}"
+                    )
+                    shutil.copy2(output_file, backup)
+                writer_kwargs.update({"mode": "a", "if_sheet_exists": "replace"})
+            else:
+                writer_kwargs["mode"] = "w"
+
+        with pd.ExcelWriter(output_file, **writer_kwargs) as writer:
             for view in views:
                 df = pd.read_sql_query(f"SELECT * FROM {view}", self.store.engine)
                 for col in df.columns:
@@ -1963,6 +2002,8 @@ if __name__ == "__main__":
     log_level = args.log_level or cfg.log_level
     setup_logging(log_level, cfg.log_file)
 
+    output_excel = Path(args.output_excel) if args.output_excel else cfg.output_excel
+
     getter = SupportStatsGetter(cfg)
     if cfg.jira_base_url:
         try:
@@ -2014,5 +2055,5 @@ if __name__ == "__main__":
     else:
         logging.error("Jira configuration missing in config file.")
 
-    if args.output_excel:
-        getter.export_views_to_excel(Path(args.output_excel))
+    if output_excel:
+        getter.export_views_to_excel(output_excel, cfg.excel_write_mode)
