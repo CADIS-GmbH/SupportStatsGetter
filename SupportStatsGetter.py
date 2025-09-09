@@ -84,7 +84,10 @@ from sqlalchemy import (
     inspect as sa_inspect
 )
 from sqlalchemy.engine import Engine
+from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 
 def log_call(func):
@@ -1451,13 +1454,14 @@ class SupportStatsGetter:
         views = inspector.get_view_names()
         output_file = Path(output_file)
 
-        writer_kwargs: dict[str, Any] = {"engine": "openpyxl"}
         if mode == "overwrite":
-            writer_kwargs["mode"] = "w"
+            wb = Workbook()
+            wb.remove(wb.active)
         elif mode == "no_overwrite":
             if output_file.exists():
                 raise FileExistsError(output_file)
-            writer_kwargs["mode"] = "w"
+            wb = Workbook()
+            wb.remove(wb.active)
         else:  # update or update_and_backup
             if output_file.exists():
                 if mode == "update_and_backup":
@@ -1466,9 +1470,10 @@ class SupportStatsGetter:
                         f"{output_file.stem}_{timestamp}{output_file.suffix}"
                     )
                     shutil.copy2(output_file, backup)
-                writer_kwargs.update({"mode": "a", "if_sheet_exists": "replace"})
+                wb = load_workbook(output_file)
             else:
-                writer_kwargs["mode"] = "w"
+                wb = Workbook()
+                wb.remove(wb.active)
         total_views = len(views)
         logging.info("Exporting %d views to Excel workbook", total_views)
 
@@ -1479,20 +1484,38 @@ class SupportStatsGetter:
                     v = f"'{v}"
             return v
 
-        with pd.ExcelWriter(output_file, **writer_kwargs) as writer:
-            for idx, view in enumerate(views, start=1):
-                logging.info("Writing view %d/%d: %s", idx, total_views, view)
-                df = pd.read_sql_query(f'SELECT * FROM "{view}"', self.store.engine)
-                for col in df.columns:
-                    if not re.search(r"(week|month|quarter|cw)", col, re.IGNORECASE):
-                        try:
-                            df[col] = pd.to_numeric(df[col])
-                        except (ValueError, TypeError):
-                            pass
-                    df[col] = df[col].apply(sanitize_value)
-                safe_name = re.sub(r'[/\\*?:\[\]]', '_', view)[:31]
-                df.to_excel(writer, sheet_name=safe_name, index=False)
+        for idx, view in enumerate(views, start=1):
+            logging.info("Writing view %d/%d: %s", idx, total_views, view)
+            df = pd.read_sql_query(f'SELECT * FROM "{view}"', self.store.engine)
+            for col in df.columns:
+                if not re.search(r"(week|month|quarter|cw)", col, re.IGNORECASE):
+                    try:
+                        df[col] = pd.to_numeric(df[col])
+                    except (ValueError, TypeError):
+                        pass
+                df[col] = df[col].apply(sanitize_value)
+            safe_name = re.sub(r'[/\\*?:\[\]]', '_', view)[:31]
+            if safe_name in wb.sheetnames:
+                ws = wb[safe_name]
+                if ws.tables:
+                    table = next(iter(ws.tables.values()))
+                    start_cell = table.ref.split(":")[0]
+                    first_row = ws[start_cell].row + 1
+                    ws.delete_rows(first_row, ws.max_row - first_row + 1)
+                    for row in dataframe_to_rows(df, index=False, header=False):
+                        ws.append([sanitize_value(v) for v in row])
+                    end_col = get_column_letter(len(df.columns))
+                    table.ref = f"{start_cell}:{end_col}{ws.max_row}"
+                else:
+                    ws.delete_rows(1, ws.max_row)
+                    for row in dataframe_to_rows(df, index=False, header=True):
+                        ws.append([sanitize_value(v) for v in row])
+            else:
+                ws = wb.create_sheet(title=safe_name)
+                for row in dataframe_to_rows(df, index=False, header=True):
+                    ws.append([sanitize_value(v) for v in row])
 
+        wb.save(output_file)
         logging.info("Finished exporting Excel workbook to %s", output_file)
 
     @log_call
