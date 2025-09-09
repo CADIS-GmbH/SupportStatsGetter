@@ -2019,6 +2019,9 @@ if __name__ == "__main__":
             processed: list[dict[str, Any]] = []
             total_issues = len(raw_issues)
             for idx, issue in enumerate(raw_issues, 1):
+                logging.info(
+                    "Processing ticket %s (%d/%d)", issue.get("key"), idx, total_issues
+                )
                 comments = getter.fetch_jira_comments(issue["id"])
                 worklogs = getter.fetch_jira_worklogs(issue["id"])
                 changelog = getter.fetch_jira_changelog(issue["id"])
