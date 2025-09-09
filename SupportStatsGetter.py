@@ -1468,9 +1468,12 @@ class SupportStatsGetter:
                 writer_kwargs.update({"mode": "a", "if_sheet_exists": "replace"})
             else:
                 writer_kwargs["mode"] = "w"
+        total_views = len(views)
+        logging.info("Exporting %d views to Excel workbook", total_views)
 
         with pd.ExcelWriter(output_file, **writer_kwargs) as writer:
-            for view in views:
+            for idx, view in enumerate(views, start=1):
+                logging.info("Writing view %d/%d: %s", idx, total_views, view)
                 df = pd.read_sql_query(f"SELECT * FROM {view}", self.store.engine)
                 for col in df.columns:
                     if not re.search(r"(week|month|quarter|cw)", col, re.IGNORECASE):
@@ -1482,6 +1485,8 @@ class SupportStatsGetter:
                         lambda v: f"'{v}" if isinstance(v, str) and v.startswith("=") else v
                     )
                 df.to_excel(writer, sheet_name=view[:31], index=False)
+
+        logging.info("Finished exporting Excel workbook to %s", output_file)
 
     @log_call
     def recalculate_all(self) -> None:
@@ -2071,3 +2076,4 @@ if __name__ == "__main__":
     if output_excel:
         logging.info("Writing Excel workbook to %s", output_excel)
         getter.export_views_to_excel(output_excel, cfg.excel_write_mode)
+        logging.info("Finished writing Excel workbook to %s", output_excel)
