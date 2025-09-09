@@ -100,3 +100,16 @@ def test_export_no_overwrite(tmp_path):
     with pytest.raises(FileExistsError):
         getter.export_views_to_excel(output, mode="no_overwrite")
 
+
+def test_export_sanitizes_sheet_and_values(tmp_path):
+    config = Config(db_path=tmp_path / "test.db")
+    getter = SupportStatsGetter(config)
+    with getter.store.engine.begin() as conn:
+        conn.exec_driver_sql('CREATE VIEW "bad/?*[]:name" AS SELECT "bad" || char(11) || "value" AS val')
+    output = tmp_path / "out.xlsx"
+    getter.export_views_to_excel(output)
+    wb = load_workbook(output)
+    assert "bad______name" in wb.sheetnames
+    ws = wb["bad______name"]
+    assert ws["A2"].value == "badvalue"
+
