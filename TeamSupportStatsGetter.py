@@ -10,6 +10,7 @@ from pathlib import Path
 import datetime
 import json
 import pytz
+import logging
 
 import dateutil.parser
 import requests
@@ -741,6 +742,9 @@ def parse_arguments():
 def main():
     args = parse_arguments()
 
+    logging.basicConfig(level=logging.INFO)
+    logging.info("Running TeamSupportStatsGetter")
+
     global KEEP_RAW_ACTION_TEXT
     KEEP_RAW_ACTION_TEXT= args.keep_raw_action_text
     global GET_ATTACHEMNTS
@@ -778,14 +782,17 @@ def main():
                                from_ts=start_ts,
                                filter_params={'GroupName[contains]': args.company},
                                attachment_save_dir = f"{args.data_dir}/attachments")
+        logging.info("Retrieved %d tickets", len(records) if records else 0)
 
     if records:
         # add the data to the data store and save
+        logging.info("Saving tickets to data store")
         tickets_data_store.add_data(records)
 
-        #recalcualte all records data and tehn replace it
+        #recalcualte all records data and then replace it
         records = tickets_data_store.data
         records = junk_deleted_open_tickets(records, base_url=args.base_url, username=args.username, password=args.password)
+        logging.info("Calculating statistics")
         records = calculate_kpi_values(records)
         actions_data_store.data = []
         history_data_store.data = []
@@ -794,15 +801,16 @@ def main():
         tickets_data_store.add_data(records)
 
 
-        # create a separate data store for actions
+        # create separate data stores for derived data
+        logging.info("Saving actions to data store")
         actions = reduce(lambda lst, e: lst + (e["Actions"] or []), records, [])
         actions_data_store.add_data(actions)
 
-        # create a separate data store for history
+        logging.info("Saving history to data store")
         history = reduce(lambda lst, e: lst + (e["History"] or []), records, [])
         history_data_store.add_data(history)
 
-        # create a separate data store for ticket calendar
+        logging.info("Saving calendar to data store")
         calendar = reduce(lambda lst, e: lst + (e["Calendar"] or []), records, [])
         calendar_data_store.add_data(calendar)
 
