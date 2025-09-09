@@ -2005,16 +2005,20 @@ if __name__ == "__main__":
     output_excel = Path(args.output_excel) if args.output_excel else cfg.output_excel
 
     getter = SupportStatsGetter(cfg)
+    logging.info("Running SupportStatsGetter")
     if cfg.jira_base_url:
         try:
             since = getter.latest_update_timestamp()
+            logging.info("Fetching Jira tickets")
             raw_issues = getter.fetch_jira_tickets(updated_since=since)
+            logging.info("Retrieved %d tickets from Jira", len(raw_issues))
             comments_total = 0
             worklogs_total = 0
             changelog_total = 0
             calendar_total = 0
             processed: list[dict[str, Any]] = []
-            for issue in raw_issues:
+            total_issues = len(raw_issues)
+            for idx, issue in enumerate(raw_issues, 1):
                 comments = getter.fetch_jira_comments(issue["id"])
                 worklogs = getter.fetch_jira_worklogs(issue["id"])
                 changelog = getter.fetch_jira_changelog(issue["id"])
@@ -2042,10 +2046,16 @@ if __name__ == "__main__":
                 for hist in changelog:
                     changelog_total += len(hist.get("items", []))
 
+                if idx % 10 == 0 or idx == total_issues:
+                    logging.info("Processed %d of %d tickets", idx, total_issues)
+
+            logging.info("Saving tickets to database")
             getter.store_jira_tickets(processed)
             if args.recalculate_all:
+                logging.info("Recalculating statistics for all tickets")
                 getter.recalculate_all()
             else:
+                logging.info("Recalculating statistics for new tickets")
                 getter.recalculate_tickets([issue["id"] for issue in processed])
             logging.info(
                 f"Stored {len(processed)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs, {changelog_total} changelog items and {calendar_total} calendar rows in {cfg.db_path}"
@@ -2056,4 +2066,5 @@ if __name__ == "__main__":
         logging.error("Jira configuration missing in config file.")
 
     if output_excel:
+        logging.info("Writing Excel workbook to %s", output_excel)
         getter.export_views_to_excel(output_excel, cfg.excel_write_mode)
