@@ -1007,7 +1007,7 @@ class DatabaseStore:
                         COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS closed_dis,
                         COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS closed_hw,
                         AVG(resolution_time_days) AS avg_resolution_days,
-                        AVG(CAST(satisfaction AS REAL) / COUNT(satisfaction)) AS csat_score,
+                        AVG(CAST(satisfaction AS REAL)) AS csat_score,
                         COUNT(satisfaction) AS csat_answers,
                         COUNT(CASE WHEN satisfaction = '1' THEN 1 END) AS csat_1,
                         COUNT(CASE WHEN satisfaction = '2' THEN 1 END) AS csat_2,
