@@ -139,7 +139,7 @@ class Config:
     output_excel: Path | None = None
     excel_write_mode: Literal[
         "overwrite", "no_overwrite", "update", "update_and_backup"
-    ] = "update_and_backup"
+    ] = "overwrite"
     custom_fields: dict[str, str] = field(default_factory=dict)
     issue_category_map: dict[str, str] = field(default_factory=dict)
 
@@ -157,7 +157,7 @@ class Config:
             log_level=data.get("log_level", "INFO"),
             log_file=Path(data.get("log_file", "support_stats.log")),
             output_excel=Path(data["output_excel"]) if data.get("output_excel") else None,
-            excel_write_mode=data.get("excel_write_mode", "update_and_backup"),
+            excel_write_mode=data.get("excel_write_mode", "overwrite"),
             custom_fields=data.get("custom_fields", {}),
             issue_category_map=data.get("issue_category_map", {}),
         )
@@ -1439,7 +1439,7 @@ class SupportStatsGetter:
     def export_views_to_excel(
         self,
         output_file: Path,
-        mode: Literal["overwrite", "no_overwrite", "update", "update_and_backup"] = "update_and_backup",
+        mode: Literal["overwrite", "no_overwrite", "update", "update_and_backup"] = "overwrite",
     ) -> None:
         """Write all database views into an Excel workbook.
 
