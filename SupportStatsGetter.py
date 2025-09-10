@@ -1499,13 +1499,22 @@ class SupportStatsGetter:
                 ws = wb[safe_name]
                 if ws.tables:
                     table = next(iter(ws.tables.values()))
-                    start_cell = table.ref.split(":")[0]
-                    first_row = ws[start_cell].row + 1
-                    ws.delete_rows(first_row, ws.max_row - first_row + 1)
-                    for row in dataframe_to_rows(df, index=False, header=False):
-                        ws.append([sanitize_value(v) for v in row])
-                    end_col = get_column_letter(len(df.columns))
-                    table.ref = f"{start_cell}:{end_col}{ws.max_row}"
+                    start_cell, old_end = table.ref.split(":")
+                    header_row = ws[start_cell].row
+                    first_row = header_row + 1
+                    start_col = ws[start_cell].column
+                    row_idx = first_row
+                    for data_row in dataframe_to_rows(df, index=False, header=False):
+                        for col_idx, value in enumerate(data_row, start=start_col):
+                            ws.cell(row=row_idx, column=col_idx, value=sanitize_value(value))
+                        row_idx += 1
+                    old_last_row = ws[old_end].row
+                    num_cols = len(df.columns)
+                    for r in range(row_idx, old_last_row + 1):
+                        for c in range(start_col, start_col + num_cols):
+                            ws.cell(row=r, column=c, value=None)
+                    end_col = get_column_letter(start_col + num_cols - 1)
+                    table.ref = f"{start_cell}:{end_col}{row_idx - 1}"
                 else:
                     ws.delete_rows(1, ws.max_row)
                     for row in dataframe_to_rows(df, index=False, header=True):
