@@ -15,7 +15,7 @@ This project collects ticket statistics from **Jira Service Management** and sto
   "log_level": "INFO",
   "log_file": "support_stats.log",
   "output_excel": "SupportStats.xlsx",
-  "excel_write_mode": "update_and_backup",
+  "excel_write_mode": "overwrite_with_backup",
   "custom_fields": {
     "request_type": "customfield_10010",
     "deployment_type": "customfield_10011",
@@ -44,10 +44,9 @@ setting for backwards compatibility.
 
 The behaviour when the file already exists is controlled by `excel_write_mode`
 in the config:
-- `overwrite` – replace the entire file.
+- `overwrite_with_backup` – overwrite the entire file but create a timestamped backup (default).
+- `overwrite` – replace the entire file without creating a backup.
 - `no_overwrite` – abort if the target exists.
-- `update` – replace only the exported sheets.
-- `update_and_backup` – like `update` but create a timestamped backup (default).
 Subsequent runs only request tickets updated after the newest record already stored.
 Comments and worklogs for each ticket are downloaded and saved alongside the tickets.
 Comments include a `public` flag to indicate visibility in the service desk.

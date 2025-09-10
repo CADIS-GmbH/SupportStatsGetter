@@ -65,7 +65,7 @@ def test_reporting_weeks_view_exported(tmp_path):
     assert ws["C2"].value == "2025.Q1"
 
 
-def test_export_update_and_backup(tmp_path):
+def test_export_overwrite_with_backup(tmp_path):
     config = Config(db_path=tmp_path / "test.db")
     getter = SupportStatsGetter(config)
     with getter.store.engine.begin() as conn:
@@ -78,14 +78,13 @@ def test_export_update_and_backup(tmp_path):
     ws["A1"] = "old"
     wb.save(output)
 
-    getter.export_views_to_excel(output, mode="update_and_backup")
+    getter.export_views_to_excel(output, mode="overwrite_with_backup")
 
     backups = list(tmp_path.glob("out_*.xlsx"))
     assert backups
 
     wb2 = load_workbook(output)
-    assert "old_sheet" in wb2.sheetnames
-    assert wb2["old_sheet"]["A1"].value == "old"
+    assert "old_sheet" not in wb2.sheetnames
     assert wb2["test_view"]["A2"].value == 1
 
 
