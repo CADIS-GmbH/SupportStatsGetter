@@ -138,8 +138,8 @@ class Config:
     log_file: Path = Path("support_stats.log")
     output_excel: Path | None = None
     excel_write_mode: Literal[
-        "overwrite", "no_overwrite", "update", "update_and_backup"
-    ] = "overwrite"
+        "overwrite_with_backup", "overwrite", "no_overwrite"
+    ] = "overwrite_with_backup"
     custom_fields: dict[str, str] = field(default_factory=dict)
     issue_category_map: dict[str, str] = field(default_factory=dict)
 
@@ -157,7 +157,7 @@ class Config:
             log_level=data.get("log_level", "INFO"),
             log_file=Path(data.get("log_file", "support_stats.log")),
             output_excel=Path(data["output_excel"]) if data.get("output_excel") else None,
-            excel_write_mode=data.get("excel_write_mode", "overwrite"),
+            excel_write_mode=data.get("excel_write_mode", "overwrite_with_backup"),
             custom_fields=data.get("custom_fields", {}),
             issue_category_map=data.get("issue_category_map", {}),
         )
@@ -1439,7 +1439,7 @@ class SupportStatsGetter:
     def export_views_to_excel(
         self,
         output_file: Path,
-        mode: Literal["overwrite", "no_overwrite", "update", "update_and_backup"] = "overwrite",
+        mode: Literal["overwrite_with_backup", "overwrite", "no_overwrite"] = "overwrite_with_backup",
     ) -> None:
         """Write all database views into an Excel workbook.
 
@@ -1454,7 +1454,16 @@ class SupportStatsGetter:
         views = inspector.get_view_names()
         output_file = Path(output_file)
 
-        if mode == "overwrite":
+        if mode == "overwrite_with_backup":
+            if output_file.exists():
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup = output_file.with_name(
+                    f"{output_file.stem}_{timestamp}{output_file.suffix}"
+                )
+                shutil.copy2(output_file, backup)
+            wb = Workbook()
+            wb.remove(wb.active)
+        elif mode == "overwrite":
             wb = Workbook()
             wb.remove(wb.active)
         elif mode == "no_overwrite":
@@ -1462,18 +1471,8 @@ class SupportStatsGetter:
                 raise FileExistsError(output_file)
             wb = Workbook()
             wb.remove(wb.active)
-        else:  # update or update_and_backup
-            if output_file.exists():
-                if mode == "update_and_backup":
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    backup = output_file.with_name(
-                        f"{output_file.stem}_{timestamp}{output_file.suffix}"
-                    )
-                    shutil.copy2(output_file, backup)
-                wb = load_workbook(output_file)
-            else:
-                wb = Workbook()
-                wb.remove(wb.active)
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
         total_views = len(views)
         logging.info("Exporting %d views to Excel workbook", total_views)
 
