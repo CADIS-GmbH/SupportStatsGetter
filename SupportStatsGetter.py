@@ -17,8 +17,9 @@ import json
 import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Pattern, Mapping
+from typing import Any, Iterable, Pattern, Mapping, Literal
 import re
+import shutil
 
 # Email patterns of internal agents used to detect response times. The patterns
 # are loaded from the ``internal_users`` table at runtime.
@@ -83,6 +84,10 @@ from sqlalchemy import (
     inspect as sa_inspect
 )
 from sqlalchemy.engine import Engine
+from openpyxl import Workbook, load_workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.dataframe import dataframe_to_rows
 
 
 def log_call(func):
@@ -131,6 +136,10 @@ class Config:
     base_jql: str | None = None
     log_level: str = "INFO"
     log_file: Path = Path("support_stats.log")
+    output_excel: Path | None = None
+    excel_write_mode: Literal[
+        "overwrite_with_backup", "overwrite", "no_overwrite"
+    ] = "overwrite_with_backup"
     custom_fields: dict[str, str] = field(default_factory=dict)
     issue_category_map: dict[str, str] = field(default_factory=dict)
 
@@ -147,6 +156,8 @@ class Config:
             base_jql=data.get("base_jql"),
             log_level=data.get("log_level", "INFO"),
             log_file=Path(data.get("log_file", "support_stats.log")),
+            output_excel=Path(data["output_excel"]) if data.get("output_excel") else None,
+            excel_write_mode=data.get("excel_write_mode", "overwrite_with_backup"),
             custom_fields=data.get("custom_fields", {}),
             issue_category_map=data.get("issue_category_map", {}),
         )
@@ -1000,7 +1011,7 @@ class DatabaseStore:
                         COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS closed_dis,
                         COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS closed_hw,
                         AVG(resolution_time_days) AS avg_resolution_days,
-                        AVG((CAST(satisfaction AS REAL) - 1.0) / 4.0) AS csat_score,
+                        AVG(CAST(satisfaction AS REAL)) AS csat_score,
                         COUNT(satisfaction) AS csat_answers,
                         COUNT(CASE WHEN satisfaction = '1' THEN 1 END) AS csat_1,
                         COUNT(CASE WHEN satisfaction = '2' THEN 1 END) AS csat_2,
@@ -1425,24 +1436,95 @@ class SupportStatsGetter:
         return self.store.newest_updated_ts()
 
     @log_call
-    def export_views_to_excel(self, output_file: Path) -> None:
-        """Write all database views into an Excel workbook."""
+    def export_views_to_excel(
+        self,
+        output_file: Path,
+        mode: Literal["overwrite_with_backup", "overwrite", "no_overwrite"] = "overwrite_with_backup",
+    ) -> None:
+        """Write all database views into an Excel workbook.
+
+        Parameters
+        ----------
+        output_file:
+            Target workbook path.
+        mode:
+            Behaviour when the target file already exists.
+        """
         inspector = sa_inspect(self.store.engine)
         views = inspector.get_view_names()
         output_file = Path(output_file)
-        with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
-            for view in views:
-                df = pd.read_sql_query(f"SELECT * FROM {view}", self.store.engine)
-                for col in df.columns:
-                    if not re.search(r"(week|month|quarter|cw)", col, re.IGNORECASE):
-                        try:
-                            df[col] = pd.to_numeric(df[col])
-                        except (ValueError, TypeError):
-                            pass
-                    df[col] = df[col].apply(
-                        lambda v: f"'{v}" if isinstance(v, str) and v.startswith("=") else v
-                    )
-                df.to_excel(writer, sheet_name=view[:31], index=False)
+
+        if mode == "overwrite_with_backup":
+            if output_file.exists():
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup = output_file.with_name(
+                    f"{output_file.stem}_{timestamp}{output_file.suffix}"
+                )
+                shutil.copy2(output_file, backup)
+            wb = Workbook()
+            wb.remove(wb.active)
+        elif mode == "overwrite":
+            wb = Workbook()
+            wb.remove(wb.active)
+        elif mode == "no_overwrite":
+            if output_file.exists():
+                raise FileExistsError(output_file)
+            wb = Workbook()
+            wb.remove(wb.active)
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
+        total_views = len(views)
+        logging.info("Exporting %d views to Excel workbook", total_views)
+
+        def sanitize_value(v: Any) -> Any:
+            if isinstance(v, str):
+                v = ILLEGAL_CHARACTERS_RE.sub("", v)
+                if v.startswith("="):
+                    v = f"'{v}"
+            return v
+
+        for idx, view in enumerate(views, start=1):
+            logging.info("Writing view %d/%d: %s", idx, total_views, view)
+            df = pd.read_sql_query(f'SELECT * FROM "{view}"', self.store.engine)
+            for col in df.columns:
+                if not re.search(r"(week|month|quarter|cw)", col, re.IGNORECASE):
+                    try:
+                        df[col] = pd.to_numeric(df[col])
+                    except (ValueError, TypeError):
+                        pass
+                df[col] = df[col].apply(sanitize_value)
+            safe_name = re.sub(r'[/\\*?:\[\]]', '_', view)[:31]
+            if safe_name in wb.sheetnames:
+                ws = wb[safe_name]
+                if ws.tables:
+                    table = next(iter(ws.tables.values()))
+                    start_cell, old_end = table.ref.split(":")
+                    header_row = ws[start_cell].row
+                    first_row = header_row + 1
+                    start_col = ws[start_cell].column
+                    row_idx = first_row
+                    for data_row in dataframe_to_rows(df, index=False, header=False):
+                        for col_idx, value in enumerate(data_row, start=start_col):
+                            ws.cell(row=row_idx, column=col_idx, value=sanitize_value(value))
+                        row_idx += 1
+                    old_last_row = ws[old_end].row
+                    num_cols = len(df.columns)
+                    for r in range(row_idx, old_last_row + 1):
+                        for c in range(start_col, start_col + num_cols):
+                            ws.cell(row=r, column=c, value=None)
+                    end_col = get_column_letter(start_col + num_cols - 1)
+                    table.ref = f"{start_cell}:{end_col}{row_idx - 1}"
+                else:
+                    ws.delete_rows(1, ws.max_row)
+                    for row in dataframe_to_rows(df, index=False, header=True):
+                        ws.append([sanitize_value(v) for v in row])
+            else:
+                ws = wb.create_sheet(title=safe_name)
+                for row in dataframe_to_rows(df, index=False, header=True):
+                    ws.append([sanitize_value(v) for v in row])
+
+        wb.save(output_file)
+        logging.info("Finished exporting Excel workbook to %s", output_file)
 
     @log_call
     def recalculate_all(self) -> None:
@@ -1963,17 +2045,26 @@ if __name__ == "__main__":
     log_level = args.log_level or cfg.log_level
     setup_logging(log_level, cfg.log_file)
 
+    output_excel = Path(args.output_excel) if args.output_excel else cfg.output_excel
+
     getter = SupportStatsGetter(cfg)
+    logging.info("Running SupportStatsGetter")
     if cfg.jira_base_url:
         try:
             since = getter.latest_update_timestamp()
+            logging.info("Fetching Jira tickets")
             raw_issues = getter.fetch_jira_tickets(updated_since=since)
+            logging.info("Retrieved %d tickets from Jira", len(raw_issues))
             comments_total = 0
             worklogs_total = 0
             changelog_total = 0
             calendar_total = 0
             processed: list[dict[str, Any]] = []
-            for issue in raw_issues:
+            total_issues = len(raw_issues)
+            for idx, issue in enumerate(raw_issues, 1):
+                logging.info(
+                    "Processing ticket %s (%d/%d)", issue.get("key"), idx, total_issues
+                )
                 comments = getter.fetch_jira_comments(issue["id"])
                 worklogs = getter.fetch_jira_worklogs(issue["id"])
                 changelog = getter.fetch_jira_changelog(issue["id"])
@@ -2001,10 +2092,16 @@ if __name__ == "__main__":
                 for hist in changelog:
                     changelog_total += len(hist.get("items", []))
 
+                if idx % 10 == 0 or idx == total_issues:
+                    logging.info("Processed %d of %d tickets", idx, total_issues)
+
+            logging.info("Saving tickets to database")
             getter.store_jira_tickets(processed)
             if args.recalculate_all:
+                logging.info("Recalculating statistics for all tickets")
                 getter.recalculate_all()
             else:
+                logging.info("Recalculating statistics for new tickets")
                 getter.recalculate_tickets([issue["id"] for issue in processed])
             logging.info(
                 f"Stored {len(processed)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs, {changelog_total} changelog items and {calendar_total} calendar rows in {cfg.db_path}"
@@ -2014,5 +2111,7 @@ if __name__ == "__main__":
     else:
         logging.error("Jira configuration missing in config file.")
 
-    if args.output_excel:
-        getter.export_views_to_excel(Path(args.output_excel))
+    if output_excel:
+        logging.info("Writing Excel workbook to %s", output_excel)
+        getter.export_views_to_excel(output_excel, cfg.excel_write_mode)
+        logging.info("Finished writing Excel workbook to %s", output_excel)

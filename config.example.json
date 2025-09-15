@@ -6,6 +6,8 @@
   "base_jql": "project = \"CSM\"  ",
   "log_level": "INFO",
   "log_file": "support_stats.log",
+  "output_excel": "SupportStats.xlsx",
+    "excel_write_mode": "overwrite_with_backup",
   "custom_fields": {
     "request_type": "customfield_10010",
     "deployment_type": "customfield_10661",

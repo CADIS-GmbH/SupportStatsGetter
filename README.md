@@ -14,6 +14,8 @@ This project collects ticket statistics from **Jira Service Management** and sto
   "base_jql": "project = DEMO",
   "log_level": "INFO",
   "log_file": "support_stats.log",
+  "output_excel": "SupportStats.xlsx",
+  "excel_write_mode": "overwrite_with_backup",
   "custom_fields": {
     "request_type": "customfield_10010",
     "deployment_type": "customfield_10011",
@@ -36,8 +38,15 @@ pip install -r requirements.txt
 python SupportStatsGetter.py --config config.json --log-level DEBUG
 ```
 Fetched tickets will be stored in the SQLite database specified in the config file.
-The option `--output-excel [filename]` writes all database views to an Excel
-workbook. If no filename is provided the file `SupportStats.xlsx` is created.
+Setting `output_excel` in the config file writes all database views to an Excel
+workbook. The command line option `--output-excel [filename]` overrides this
+setting for backwards compatibility.
+
+The behaviour when the file already exists is controlled by `excel_write_mode`
+in the config:
+- `overwrite_with_backup` – overwrite the entire file but create a timestamped backup (default).
+- `overwrite` – replace the entire file without creating a backup.
+- `no_overwrite` – abort if the target exists.
 Subsequent runs only request tickets updated after the newest record already stored.
 Comments and worklogs for each ticket are downloaded and saved alongside the tickets.
 Comments include a `public` flag to indicate visibility in the service desk.

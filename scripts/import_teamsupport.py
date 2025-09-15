@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 from pathlib import Path
 import datetime
 import pytz
@@ -297,13 +298,16 @@ def map_calendar(cal):
 
 
 def main():
+    logging.info("Running import_teamsupport main")
     parser = argparse.ArgumentParser(description="Import TeamSupport JSON data into the database")
     parser.add_argument("--db", default="support_stats.sqlite", help="Path to SQLite database file")
     parser.add_argument("--input", default=str(Path("resource/tickets.json")), help="Path to JSON file")
     args = parser.parse_args()
 
+    logging.info("Loading tickets from %s", args.input)
     with open(args.input, "r", encoding="utf-8") as f:
         tickets = json.load(f)
+    logging.info("Loaded %d tickets", len(tickets))
 
     engine = create_engine(f"sqlite+pysqlite:///{args.db}")
     store = DatabaseStore(engine)
@@ -330,11 +334,16 @@ def main():
         for cal in t.get("Calendar", []):
             calendar_rows.append(map_calendar(cal))
 
+    logging.info("Saving records to database")
     store.insert_many(store.jira_tickets, ticket_rows)
     store.insert_many(store.jira_comments, comment_rows)
     store.insert_many(store.jira_worklogs, worklog_rows)
     store.insert_many(store.jira_changelog, changelog_rows)
     store.insert_many(store.jira_calendar, calendar_rows)
+    logging.info(
+        "Inserted %d tickets, %d comments, %d worklogs, %d changelog items and %d calendar rows into %s",
+        len(ticket_rows), len(comment_rows), len(worklog_rows), len(changelog_rows), len(calendar_rows), args.db
+    )
 
 
 if __name__ == "__main__":
