@@ -71,6 +71,11 @@ NO_CONTACT_IGNORE_STATUSES = {
     "PENDING",
 }
 
+DEFAULT_NON_SUPPORT_REQUEST_TYPES = [
+    "Maintenance & Service Operations",
+    "Product trial questions",
+]
+
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
 JIRA_PULL_OVERLAP_MIN = 5 #60*24*7  #5
 
@@ -142,6 +147,9 @@ class Config:
     ] = "overwrite_with_backup"
     custom_fields: dict[str, str] = field(default_factory=dict)
     issue_category_map: dict[str, str] = field(default_factory=dict)
+    non_support_request_types: list[str] = field(
+        default_factory=lambda: DEFAULT_NON_SUPPORT_REQUEST_TYPES.copy()
+    )
 
     @staticmethod
     @log_call
@@ -160,6 +168,12 @@ class Config:
             excel_write_mode=data.get("excel_write_mode", "overwrite_with_backup"),
             custom_fields=data.get("custom_fields", {}),
             issue_category_map=data.get("issue_category_map", {}),
+            non_support_request_types=list(
+                data.get(
+                    "non_support_request_types",
+                    DEFAULT_NON_SUPPORT_REQUEST_TYPES,
+                )
+            ),
         )
 
 
@@ -607,11 +621,21 @@ class DatabaseStore:
     """Simple wrapper around a database using SQLAlchemy."""
 
     @log_call
-    def __init__(self, engine: Engine | None = None):
+    def __init__(
+        self,
+        engine: Engine | None = None,
+        non_support_request_types: Iterable[str] | None = None,
+    ):
         if engine is None:
             engine = create_engine("sqlite+pysqlite:///support_stats.sqlite")
         self.engine = engine
         self.meta = MetaData()
+        if non_support_request_types is None:
+            self.non_support_request_types = DEFAULT_NON_SUPPORT_REQUEST_TYPES.copy()
+        else:
+            self.non_support_request_types = [
+                str(value) for value in non_support_request_types
+            ]
         self._prepare_schema()
 
     def _drop_view_if_exists(self, conn, view_name: str) -> None:
@@ -811,6 +835,43 @@ class DatabaseStore:
 
         is_junk_expr = "CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END"
         request_type_expr = "CASE WHEN jt.request_type LIKE '%Hardware%' THEN 'HW' ELSE 'SW' END"
+        if self.non_support_request_types:
+            excluded_values = ", ".join(
+                "'" + value.replace("'", "''") + "'"
+                for value in self.non_support_request_types
+            )
+            aged_request_type_filter = (
+                " AND (jc.end_request_type IS NULL OR jc.end_request_type NOT IN ("
+                + excluded_values
+                + "))"
+            )
+            calendar_request_type_filter = (
+                " AND (COALESCE(jt.request_type, jc.end_request_type) IS NULL"
+                " OR COALESCE(jt.request_type, jc.end_request_type) NOT IN ("
+                + excluded_values
+                + "))"
+            )
+            tickets_request_type_filter = (
+                " AND (jt.request_type IS NULL OR jt.request_type NOT IN ("
+                + excluded_values
+                + "))"
+            )
+            reporting_request_type_filter = (
+                " AND (jtr.request_type IS NULL OR jtr.request_type NOT IN ("
+                + excluded_values
+                + "))"
+            )
+            active_request_type_filter = (
+                " AND (jtaw.request_type IS NULL OR jtaw.request_type NOT IN ("
+                + excluded_values
+                + "))"
+            )
+        else:
+            aged_request_type_filter = ""
+            calendar_request_type_filter = ""
+            tickets_request_type_filter = ""
+            reporting_request_type_filter = ""
+            active_request_type_filter = ""
 
         # create a view exposing reporting month and quarter columns
         view_sql = f"""
@@ -942,17 +1003,18 @@ class DatabaseStore:
                         COUNT(DISTINCT CASE WHEN request_type_category = 'SW' THEN id END) AS open_sw,
                         COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS open_dis,
                         COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS open_hw
-                    FROM jira_tickets_active_weeks
+                    FROM jira_tickets_active_weeks jtaw
                     JOIN week_reporting wr ON wr.calendar_week = active_week
                     WHERE COALESCE(status, '') != 'Cancelled'
+                      {active_request_type_filter}
                     GROUP BY wr.{period_col}
                 ),
                 friday_week AS (
                     SELECT
                         jc.cw AS cw,
                         COUNT(DISTINCT jc.ticket_id) AS overall_open,
-                        COUNT(DISTINCT CASE WHEN jc.total_days_open > 5 THEN jc.ticket_id END) AS aged_5,
-                        COUNT(DISTINCT CASE WHEN jc.total_days_open > 30 THEN jc.ticket_id END) AS aged_30,
+                        COUNT(DISTINCT CASE WHEN jc.total_days_open > 5{aged_request_type_filter} THEN jc.ticket_id END) AS aged_5,
+                        COUNT(DISTINCT CASE WHEN jc.total_days_open > 30{aged_request_type_filter} THEN jc.ticket_id END) AS aged_30,
                         COUNT(DISTINCT CASE WHEN jc.end_assigned_user IS NULL OR jc.end_assigned_user = '' THEN jc.ticket_id END) AS unassigned,
                         COUNT(DISTINCT CASE WHEN LOWER(jc.end_status) NOT IN ({statuses}) AND jc.weekdays_days_since_last_contact > 5 THEN jc.ticket_id END) AS over5_no_contact
                     FROM jira_calendar jc
@@ -961,6 +1023,7 @@ class DatabaseStore:
                       AND LOWER(jc.end_status) NOT IN ('resolved','closed','cancelled')
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
+                      {calendar_request_type_filter}
                     GROUP BY jc.cw
                 ),
                 friday AS (
@@ -983,6 +1046,7 @@ class DatabaseStore:
                     WHERE jc.end_priority_pos > 0
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
+                      {calendar_request_type_filter}
                     GROUP BY wr.{period_col}
                 ),
                 escalated AS (
@@ -994,6 +1058,7 @@ class DatabaseStore:
                       AND jc.end_priority_pos > jc.start_priority_pos
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
+                      {calendar_request_type_filter}
                     GROUP BY wr.{period_col}
                 ),
                 newt AS (
@@ -1001,6 +1066,7 @@ class DatabaseStore:
                     FROM jira_tickets jt
                     JOIN week_reporting wr ON wr.calendar_week = jt.created_week
                     WHERE COALESCE(jt.status, '') != 'Cancelled'
+                      {tickets_request_type_filter}
                     GROUP BY wr.{period_col}
                 ),
                 closed AS (
@@ -1022,6 +1088,7 @@ class DatabaseStore:
                     JOIN week_reporting wr ON wr.calendar_week = jtr.resolved_week
                     WHERE jtr.resolved_week IS NOT NULL
                       AND COALESCE(jtr.status, '') != 'Cancelled'
+                      {reporting_request_type_filter}
                     GROUP BY wr.{period_col}
                 ),
                 median_fr AS (
@@ -1036,6 +1103,7 @@ class DatabaseStore:
                         JOIN week_reporting wr ON wr.calendar_week = jt.first_response_date_week
                         WHERE jt.first_response_time_minutes IS NOT NULL
                           AND COALESCE(jt.status, '') != 'Cancelled'
+                          {tickets_request_type_filter}
                     ) t
                     WHERE rn IN ((cnt + 1)/2, (cnt + 2)/2)
                     GROUP BY period
@@ -1108,6 +1176,11 @@ class DatabaseStore:
                 statuses=statuses,
                 aged_30_subquery=aged_30_subquery,
                 aged_5_subquery=aged_5_subquery,
+                aged_request_type_filter=aged_request_type_filter,
+                calendar_request_type_filter=calendar_request_type_filter,
+                tickets_request_type_filter=tickets_request_type_filter,
+                reporting_request_type_filter=reporting_request_type_filter,
+                active_request_type_filter=active_request_type_filter,
             )
 
         weekly_report_view_sql = build_summary_view_sql(
@@ -1404,7 +1477,9 @@ class SupportStatsGetter:
     def __init__(self, config: Config):
         self.config = config
         engine = create_engine(f"sqlite+pysqlite:///{config.db_path}")
-        self.store = DatabaseStore(engine)
+        self.store = DatabaseStore(
+            engine, non_support_request_types=config.non_support_request_types
+        )
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
         global ORG_PATTERNS
