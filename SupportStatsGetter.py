@@ -951,8 +951,12 @@ class DatabaseStore:
                     SELECT
                         jc.cw AS cw,
                         COUNT(DISTINCT jc.ticket_id) AS overall_open,
-                        COUNT(DISTINCT CASE WHEN jc.total_days_open > 5 THEN jc.ticket_id END) AS aged_5,
-                        COUNT(DISTINCT CASE WHEN jc.total_days_open > 30 THEN jc.ticket_id END) AS aged_30,
+                        COUNT(DISTINCT CASE
+                            WHEN jc.total_days_open > 5 THEN jc.ticket_id
+                        END) AS aged_5,
+                        COUNT(DISTINCT CASE
+                            WHEN jc.total_days_open > 30 THEN jc.ticket_id
+                        END) AS aged_30,
                         COUNT(DISTINCT CASE WHEN jc.end_assigned_user IS NULL OR jc.end_assigned_user = '' THEN jc.ticket_id END) AS unassigned,
                         COUNT(DISTINCT CASE WHEN LOWER(jc.end_status) NOT IN ({statuses}) AND jc.weekdays_days_since_last_contact > 5 THEN jc.ticket_id END) AS over5_no_contact
                     FROM jira_calendar jc
