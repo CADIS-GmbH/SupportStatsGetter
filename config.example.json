@@ -19,5 +19,9 @@
     "time_to_close": "customfield_10695",
     "time_to_qualified_answer": "customfield_10595",
     "time_to_resolution": "customfield_10197"
-  }
+  },
+  "non_support_request_types": [
+    "Maintenance & Service Operations",
+    "Product trial questions"
+  ]
 }
