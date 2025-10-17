@@ -74,6 +74,7 @@ NO_CONTACT_IGNORE_STATUSES = {
 DEFAULT_NON_SUPPORT_REQUEST_TYPES = [
     "Maintenance & Service Operations",
     "Product trial questions",
+    "Change request",
 ]
 
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
