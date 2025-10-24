@@ -75,6 +75,7 @@ DEFAULT_NON_SUPPORT_REQUEST_TYPES = [
     "Maintenance & Service Operations",
     "Product trial questions",
     "Change request",
+    "Licensing and billing questions"
 ]
 
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
