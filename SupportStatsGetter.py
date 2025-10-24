@@ -404,13 +404,11 @@ def make_jira_ticket_calendar(
     changelog: list[dict[str, Any]],
     issue_category_map: Mapping[str, str] | None = None,
     request_type_field: str | None = None,
-    work_type_field: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return per-day statistics for a Jira issue."""
 
     req_field_lower = (request_type_field or "request type").lower()
     issue_category_map = issue_category_map or {}
-    work_field_lower = (work_type_field or "work type").lower()
 
     created = issue.get("created")
     if not created:
@@ -440,6 +438,7 @@ def make_jira_ticket_calendar(
         user_email = (fields.get("assignee") or {}).get("emailAddress")
         lbls: list[str] = list(fields.get("labels") or [])
         priority = (fields.get("priority") or {}).get("name") or ""
+
         prio_pos = PRIORITY_POS_MAP.get(priority, 0)
         req_type_raw = (
             fields.get("requestType")
@@ -451,8 +450,8 @@ def make_jira_ticket_calendar(
         work_type_raw = (
             fields.get("workType")
             or fields.get("work_type")
-            or fields.get("work type")
-            or fields.get(work_type_field or "")
+            or fields.get("worktype")
+            or ""
         )
         work_type = SupportStatsGetter._simple_value(work_type_raw)
 
@@ -484,7 +483,7 @@ def make_jira_ticket_calendar(
                 elif field in {req_field_lower, "request type"}:
                     req_type = SupportStatsGetter._simple_value(prev_val)
                     issue_cat = issue_category_map.get(req_type) if req_type else None
-                elif field in {work_field_lower, "work type"}:
+                elif field in {"work_type", "workType"}:
                     work_type = SupportStatsGetter._simple_value(prev_val)
 
         return (
@@ -584,7 +583,7 @@ def make_jira_ticket_calendar(
                     elif field and field.lower() in {req_field_lower, "request type"}:
                         request_type = to_string or request_type
                         issue_category = issue_category_map.get(request_type) if request_type else issue_category
-                    elif field and field.lower() in {work_field_lower, "work type"}:
+                    elif field and field.lower() in {"workType", "worktype"}:
                         to_val = to_string if to_string is not None else item.get("to")
                         work_type = SupportStatsGetter._simple_value(to_val)
             idx += 1
@@ -1938,7 +1937,7 @@ class SupportStatsGetter:
                 self._field_value(
                     fields,
                     "work_type",
-                    ["workType", "Work type", "work type"],
+                    ["workType", "worktype", "work_type"],
                 )
             )
             participants = self._field_value(
@@ -2216,8 +2215,7 @@ if __name__ == "__main__":
                     worklogs,
                     changelog,
                     getter.config.issue_category_map,
-                    getter.config.custom_fields.get("request_type"),
-                    getter.config.custom_fields.get("work_type"),
+                    getter.config.custom_fields.get("request_type")
                 )
                 getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
                 calendar_total += len(calendar_rows)
