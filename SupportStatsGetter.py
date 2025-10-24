@@ -195,6 +195,8 @@ class JiraCalendarRecord:
     end_assigned_user_email: str | None = None
     start_request_type: str | None = None
     end_request_type: str | None = None
+    start_work_type: str | None = None
+    end_work_type: str | None = None
     start_issue_category: str | None = None
     end_issue_category: str | None = None
     did_escalate_priority: bool = False
@@ -401,11 +403,13 @@ def make_jira_ticket_calendar(
     changelog: list[dict[str, Any]],
     issue_category_map: Mapping[str, str] | None = None,
     request_type_field: str | None = None,
+    work_type_field: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return per-day statistics for a Jira issue."""
 
     req_field_lower = (request_type_field or "request type").lower()
     issue_category_map = issue_category_map or {}
+    work_field_lower = (work_type_field or "work type").lower()
 
     created = issue.get("created")
     if not created:
@@ -443,6 +447,13 @@ def make_jira_ticket_calendar(
         )
         req_type = SupportStatsGetter._simple_value(req_type_raw)
         issue_cat = issue_category_map.get(req_type) if req_type else None
+        work_type_raw = (
+            fields.get("workType")
+            or fields.get("work_type")
+            or fields.get("work type")
+            or fields.get(work_type_field or "")
+        )
+        work_type = SupportStatsGetter._simple_value(work_type_raw)
 
         histories = sorted(
             changelog, key=lambda h: h.get("created") or datetime.datetime.min, reverse=True
@@ -465,12 +476,15 @@ def make_jira_ticket_calendar(
                         lbls = [str(l) for l in prev_val]
                     else:
                         lbls = [l.strip() for l in str(prev_val).split(",") if l.strip()]
+                    assigned_group = group_from_labels(lbls)
                 elif field == "priority":
                     priority = str(prev_val)
                     prio_pos = PRIORITY_POS_MAP.get(priority, 0)
                 elif field in {req_field_lower, "request type"}:
                     req_type = SupportStatsGetter._simple_value(prev_val)
                     issue_cat = issue_category_map.get(req_type) if req_type else None
+                elif field in {work_field_lower, "work type"}:
+                    work_type = SupportStatsGetter._simple_value(prev_val)
 
         return (
             status,
@@ -482,6 +496,7 @@ def make_jira_ticket_calendar(
             prio_pos,
             req_type,
             issue_cat,
+            work_type,
         )
 
     (
@@ -494,6 +509,7 @@ def make_jira_ticket_calendar(
         priority_pos,
         request_type,
         issue_category,
+        work_type,
     ) = derive_initial_state()
 
     adjusted_days = 0
@@ -532,6 +548,7 @@ def make_jira_ticket_calendar(
         day_start_priority_pos = priority_pos
         day_start_request_type = request_type
         day_start_issue_category = issue_category
+        day_start_work_type = work_type
 
         while idx < len(events) and events[idx][0].date() == cur:
             ts, etype, data = events[idx]
@@ -566,6 +583,9 @@ def make_jira_ticket_calendar(
                     elif field and field.lower() in {req_field_lower, "request type"}:
                         request_type = to_string or request_type
                         issue_category = issue_category_map.get(request_type) if request_type else issue_category
+                    elif field and field.lower() in {work_field_lower, "work type"}:
+                        to_val = to_string if to_string is not None else item.get("to")
+                        work_type = SupportStatsGetter._simple_value(to_val)
             idx += 1
 
         record = JiraCalendarRecord(
@@ -587,6 +607,8 @@ def make_jira_ticket_calendar(
             end_priority_pos=priority_pos,
             start_request_type=day_start_request_type,
             end_request_type=request_type,
+            start_work_type=day_start_work_type,
+            end_work_type=work_type,
             start_issue_category=day_start_issue_category,
             end_issue_category=issue_category,
             start_status=day_start_status,
@@ -676,6 +698,7 @@ class DatabaseStore:
             Column("first_response_time_minutes", Integer),
             Column("resolution_time_days", Float),
             Column("request_type", String),
+            Column("work_type", String),
             Column("issue_category", String),
             Column("deployment_type", String),
             Column("organizations", Text),
@@ -748,6 +771,8 @@ class DatabaseStore:
             Column("end_assigned_user_email", String),
             Column("start_request_type", String),
             Column("end_request_type", String),
+            Column("start_work_type", String),
+            Column("end_work_type", String),
             Column("start_issue_category", String),
             Column("end_issue_category", String),
             Column("did_escalate_priority", Boolean),
@@ -874,6 +899,12 @@ class DatabaseStore:
             reporting_request_type_filter = ""
             active_request_type_filter = ""
 
+        aged_request_type_filter += " AND (jt.work_type IS NULL OR LOWER(jt.work_type) = 'support')"
+        calendar_request_type_filter += " AND (jt.work_type IS NULL OR LOWER(jt.work_type) = 'support')"
+        tickets_request_type_filter += " AND (jt.work_type IS NULL OR LOWER(jt.work_type) = 'support')"
+        reporting_request_type_filter += " AND (jtr.work_type IS NULL OR LOWER(jtr.work_type) = 'support')"
+        active_request_type_filter += " AND (jtaw.work_type IS NULL OR LOWER(jtaw.work_type) = 'support')"
+
         # create a view exposing reporting month and quarter columns
         view_sql = f"""
             CREATE VIEW jira_tickets_reporting AS
@@ -930,6 +961,8 @@ class DatabaseStore:
                 jc.end_assigned_user_email,
                 jc.start_request_type,
                 jc.end_request_type,
+                jc.start_work_type,
+                jc.end_work_type,
                 jc.start_issue_category,
                 jc.end_issue_category,
                 jc.did_escalate_priority,
@@ -1276,6 +1309,9 @@ class DatabaseStore:
         if "request_type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN request_type VARCHAR"))
+        if "work_type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN work_type VARCHAR"))
         if "issue_category" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN issue_category VARCHAR"))
@@ -1317,6 +1353,12 @@ class DatabaseStore:
         if "end_request_type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_request_type VARCHAR"))
+        if "start_work_type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN start_work_type VARCHAR"))
+        if "end_work_type" not in cols:
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_work_type VARCHAR"))
         if "start_issue_category" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN start_issue_category VARCHAR"))
@@ -1670,6 +1712,8 @@ class SupportStatsGetter:
                 fields["satisfaction_ts"] = issue_row.get("satisfaction_ts")
             if issue_row.get("work_category"):
                 fields["work category"] = issue_row.get("work_category")
+            if issue_row.get("work_type"):
+                fields["work type"] = issue_row.get("work_type")
             if issue_row.get("sentiment"):
                 fields["sentiment"] = issue_row.get("sentiment")
 
@@ -1690,6 +1734,7 @@ class SupportStatsGetter:
                 changelog,
                 self.config.issue_category_map,
                 self.config.custom_fields.get("request_type"),
+                self.config.custom_fields.get("work_type"),
             )
             with self.store.engine.begin() as conn:
                 conn.execute(
@@ -1888,6 +1933,13 @@ class SupportStatsGetter:
             issue_cat = (
                 self.config.issue_category_map.get(req_type) if req_type else None
             )
+            work_type = self._simple_value(
+                self._field_value(
+                    fields,
+                    "work_type",
+                    ["workType", "Work type", "work type"],
+                )
+            )
             participants = self._field_value(
                 fields, "request_participants", ["requestParticipants"]
             )
@@ -1915,6 +1967,7 @@ class SupportStatsGetter:
                     "priority": prio_txt,
                     "priority_pos": prio_pos,
                     "request_type": req_type,
+                    "work_type": work_type,
                     "issue_category": issue_cat,
                     "deployment_type": self._simple_value(
                         self._field_value(fields, "deployment_type", ["Deployment type"])
@@ -2163,6 +2216,7 @@ if __name__ == "__main__":
                     changelog,
                     getter.config.issue_category_map,
                     getter.config.custom_fields.get("request_type"),
+                    getter.config.custom_fields.get("work_type"),
                 )
                 getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
                 calendar_total += len(calendar_rows)

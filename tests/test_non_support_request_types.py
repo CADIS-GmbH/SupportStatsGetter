@@ -35,6 +35,7 @@ def test_aged_counts_exclude_configured_request_types(tmp_path):
                 "updated": day,
                 "created_week": reporting_week,
                 "request_type": "Support question",
+                "work_type": "Support",
             },
             {
                 "id": "T-custom",
@@ -45,6 +46,7 @@ def test_aged_counts_exclude_configured_request_types(tmp_path):
                 "updated": day,
                 "created_week": reporting_week,
                 "request_type": "Custom Non Support",
+                "work_type": "Support",
             },
             {
                 "id": "T-maint",
@@ -55,6 +57,18 @@ def test_aged_counts_exclude_configured_request_types(tmp_path):
                 "updated": day,
                 "created_week": reporting_week,
                 "request_type": "Maintenance & Service Operations",
+                "work_type": "Support",
+            },
+            {
+                "id": "T-feature",
+                "key": "T-feature",
+                "summary": "Excluded by work type",
+                "status": "Open",
+                "created": day,
+                "updated": day,
+                "created_week": reporting_week,
+                "request_type": "Support question",
+                "work_type": "Feature",
             },
         ],
     )
@@ -70,6 +84,7 @@ def test_aged_counts_exclude_configured_request_types(tmp_path):
         "start_assigned_user_email": None,
         "end_assigned_user_email": None,
         "start_request_type": None,
+        "start_work_type": None,
         "start_issue_category": None,
         "end_issue_category": None,
         "did_escalate_priority": False,
@@ -102,6 +117,7 @@ def test_aged_counts_exclude_configured_request_types(tmp_path):
                 "ticket_id": "T-include",
                 "ticket_key": "T-include",
                 "end_request_type": "Support question",
+                "end_work_type": "Support",
             },
             {
                 **calendar_base,
@@ -109,6 +125,7 @@ def test_aged_counts_exclude_configured_request_types(tmp_path):
                 "ticket_id": "T-custom",
                 "ticket_key": "T-custom",
                 "end_request_type": "Custom Non Support",
+                "end_work_type": "Support",
             },
             {
                 **calendar_base,
@@ -116,6 +133,15 @@ def test_aged_counts_exclude_configured_request_types(tmp_path):
                 "ticket_id": "T-maint",
                 "ticket_key": "T-maint",
                 "end_request_type": "Maintenance & Service Operations",
+                "end_work_type": "Support",
+            },
+            {
+                **calendar_base,
+                "record_id": "rec-feature",
+                "ticket_id": "T-feature",
+                "ticket_key": "T-feature",
+                "end_request_type": "Support question",
+                "end_work_type": "Feature",
             },
         ],
     )
