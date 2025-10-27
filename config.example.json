@@ -14,6 +14,7 @@
     "organizations": "customfield_10002",
     "satisfaction": "customfield_10060",
     "satisfaction_ts": "customfield_10061",
+    "work_type": "customfield_12345",
     "work_category": "customfield_10194",
     "sentiment": "customfield_10162",
     "time_to_close": "customfield_10695",
