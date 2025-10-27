@@ -1,2 +1,2 @@
-cd D:\Daten\VersionControl\DEV_HOME\TeamSupportStatsGetter
-python SupportStatsGetter.py -c config_XYZ.json
+cd C:\temp\teamsupportstatsgetter
+python SupportStatsGetter.py -c config.json
