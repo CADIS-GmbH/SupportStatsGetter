@@ -24,5 +24,6 @@
   "non_support_request_types": [
     "Maintenance & Service Operations",
     "Product trial questions"
-  ]
+  ],
+  "priority_deescalation_ignore_minutes": 5
 }

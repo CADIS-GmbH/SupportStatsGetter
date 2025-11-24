@@ -152,6 +152,7 @@ class Config:
     non_support_request_types: list[str] = field(
         default_factory=lambda: DEFAULT_NON_SUPPORT_REQUEST_TYPES.copy()
     )
+    priority_deescalation_ignore_minutes: int = 5
 
     @staticmethod
     @log_call
@@ -175,6 +176,9 @@ class Config:
                     "non_support_request_types",
                     DEFAULT_NON_SUPPORT_REQUEST_TYPES,
                 )
+            ),
+            priority_deescalation_ignore_minutes=data.get(
+                "priority_deescalation_ignore_minutes", 5
             ),
         )
 
@@ -405,6 +409,7 @@ def make_jira_ticket_calendar(
     issue_category_map: Mapping[str, str] | None = None,
     request_type_field: str | None = None,
     work_type_field: str | None = None,
+    priority_deescalation_ignore_minutes: int = 5,
 ) -> list[dict[str, Any]]:
     """Return per-day statistics for a Jira issue."""
 
@@ -545,6 +550,9 @@ def make_jira_ticket_calendar(
     cur = created.date()
     end_date = end_dt.date()
     idx = 0
+    escalation_grace = datetime.timedelta(
+        minutes=priority_deescalation_ignore_minutes
+    )
     while cur <= end_date:
         day_actions = 0
         day_public = 0
@@ -558,6 +566,8 @@ def make_jira_ticket_calendar(
         day_start_request_type = request_type
         day_start_issue_category = issue_category
         day_start_work_type = work_type
+        day_escalated_priority = False
+        pending_escalation_ts: datetime.datetime | None = None
 
         while idx < len(events) and events[idx][0].date() == cur:
             ts, etype, data = events[idx]
@@ -584,8 +594,18 @@ def make_jira_ticket_calendar(
                     elif field and field.lower() == "assignee":
                         assigned_user = to_string or assigned_user
                     elif field and field.lower() == "priority":
+                        prev_priority_pos = priority_pos
                         priority_txt = to_string or priority_txt
                         priority_pos = PRIORITY_POS_MAP.get(priority_txt, 0)
+                        delta = priority_pos - prev_priority_pos
+                        if delta > 0:
+                            pending_escalation_ts = ts
+                        elif delta < 0 and pending_escalation_ts:
+                            if ts - pending_escalation_ts <= escalation_grace:
+                                pending_escalation_ts = None
+                            else:
+                                day_escalated_priority = True
+                                pending_escalation_ts = None
                     elif field and field.lower() == "labels":
                         labels = [l.strip() for l in (to_string or "").split(",") if l.strip()]
                         assigned_group = group_from_labels(labels) or assigned_group
@@ -596,6 +616,9 @@ def make_jira_ticket_calendar(
                         to_val = to_string if to_string is not None else item.get("to")
                         work_type = SupportStatsGetter._simple_value(to_val)
             idx += 1
+
+        if pending_escalation_ts:
+            day_escalated_priority = True
 
         record = JiraCalendarRecord(
             date=cur,
@@ -609,7 +632,7 @@ def make_jira_ticket_calendar(
             end_assigned_user=assigned_user,
             start_assigned_user_email=day_start_user_email,
             end_assigned_user_email=assigned_user_email,
-            did_escalate_priority=day_start_priority_pos < priority_pos,
+            did_escalate_priority=day_escalated_priority,
             start_priority_txt=day_start_priority_txt,
             start_priority_pos=day_start_priority_pos,
             end_priority_txt=priority_txt,
@@ -2226,6 +2249,7 @@ if __name__ == "__main__":
                     getter.config.issue_category_map,
                     getter.config.custom_fields.get("request_type"),
                     getter.config.custom_fields.get("work_type"),
+                    getter.config.priority_deescalation_ignore_minutes,
                 )
                 getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
                 calendar_total += len(calendar_rows)
