@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from SupportStatsGetter import Config, SupportStatsGetter
+from SupportStatsGetter import Config, SupportStatsGetter, make_jira_ticket_calendar
 from scripts.import_teamsupport import map_history
 
 
@@ -175,3 +175,71 @@ def test_recalculate_all_detects_priority_escalation_from_history(tmp_path):
         and r["did_escalate_priority"]
         for r in rows
     )
+
+
+def test_priority_escalation_ignores_quick_reversal():
+    issue = {
+        "id": "1",
+        "key": "TST-1",
+        "created": datetime.datetime(2025, 1, 1, 9, 0, tzinfo=datetime.UTC),
+        "resolved": datetime.datetime(2025, 1, 1, 18, 0, tzinfo=datetime.UTC),
+        "fields": {"priority": {"name": "Normal"}},
+    }
+    changelog = [
+        {
+            "created": datetime.datetime(2025, 1, 1, 10, 0, tzinfo=datetime.UTC),
+            "items": [
+                {"field": "priority", "fromString": "Normal", "toString": "Critical"}
+            ],
+        },
+        {
+            "created": datetime.datetime(2025, 1, 1, 10, 3, tzinfo=datetime.UTC),
+            "items": [
+                {"field": "priority", "fromString": "Critical", "toString": "Normal"}
+            ],
+        },
+    ]
+
+    rows = make_jira_ticket_calendar(
+        issue,
+        [],
+        [],
+        changelog,
+        priority_deescalation_ignore_minutes=5,
+    )
+
+    assert rows[0]["did_escalate_priority"] is False
+
+
+def test_priority_escalation_counts_after_grace_period():
+    issue = {
+        "id": "1",
+        "key": "TST-1",
+        "created": datetime.datetime(2025, 1, 1, 9, 0, tzinfo=datetime.UTC),
+        "resolved": datetime.datetime(2025, 1, 1, 18, 0, tzinfo=datetime.UTC),
+        "fields": {"priority": {"name": "Normal"}},
+    }
+    changelog = [
+        {
+            "created": datetime.datetime(2025, 1, 1, 10, 0, tzinfo=datetime.UTC),
+            "items": [
+                {"field": "priority", "fromString": "Normal", "toString": "Critical"}
+            ],
+        },
+        {
+            "created": datetime.datetime(2025, 1, 1, 10, 10, tzinfo=datetime.UTC),
+            "items": [
+                {"field": "priority", "fromString": "Critical", "toString": "Normal"}
+            ],
+        },
+    ]
+
+    rows = make_jira_ticket_calendar(
+        issue,
+        [],
+        [],
+        changelog,
+        priority_deescalation_ignore_minutes=5,
+    )
+
+    assert rows[0]["did_escalate_priority"] is True
