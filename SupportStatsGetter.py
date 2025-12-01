@@ -148,7 +148,6 @@ class Config:
         "overwrite_with_backup", "overwrite", "no_overwrite"
     ] = "overwrite_with_backup"
     custom_fields: dict[str, str] = field(default_factory=dict)
-    issue_category_map: dict[str, str] = field(default_factory=dict)
     non_support_request_types: list[str] = field(
         default_factory=lambda: DEFAULT_NON_SUPPORT_REQUEST_TYPES.copy()
     )
@@ -170,7 +169,6 @@ class Config:
             output_excel=Path(data["output_excel"]) if data.get("output_excel") else None,
             excel_write_mode=data.get("excel_write_mode", "overwrite_with_backup"),
             custom_fields=data.get("custom_fields", {}),
-            issue_category_map=data.get("issue_category_map", {}),
             non_support_request_types=list(
                 data.get(
                     "non_support_request_types",
@@ -200,10 +198,8 @@ class JiraCalendarRecord:
     end_assigned_user_email: str | None = None
     start_request_type: str | None = None
     end_request_type: str | None = None
-    start_work_type: str | None = None
-    end_work_type: str | None = None
-    start_issue_category: str | None = None
-    end_issue_category: str | None = None
+    start_issuetype: str | None = None
+    end_issuetype: str | None = None
     did_escalate_priority: bool = False
     did_escalate_cs: bool = False
     did_escalate_management: bool = False
@@ -406,22 +402,13 @@ def make_jira_ticket_calendar(
     comments: list[dict[str, Any]],
     worklogs: list[dict[str, Any]],
     changelog: list[dict[str, Any]],
-    issue_category_map: Mapping[str, str] | None = None,
     request_type_field: str | None = None,
-    work_type_field: str | None = None,
     priority_deescalation_ignore_minutes: int = 5,
 ) -> list[dict[str, Any]]:
     """Return per-day statistics for a Jira issue."""
 
     req_field_lower = (request_type_field or "request type").lower()
-    work_field_lower = (work_type_field or "work type").lower()
-    issue_category_map = issue_category_map or {}
-    work_field_aliases = {
-        "worktype",
-        "work_type",
-        "work type",
-        work_field_lower,
-    }
+    issuetype_field_lower = "issuetype"
 
     created = issue.get("created")
     if not created:
@@ -459,15 +446,8 @@ def make_jira_ticket_calendar(
             or fields.get(request_type_field or "")
         )
         req_type = SupportStatsGetter._simple_value(req_type_raw)
-        issue_cat = issue_category_map.get(req_type) if req_type else None
-        work_type_raw = (
-            fields.get("workType")
-            or fields.get("work_type")
-            or fields.get("worktype")
-            or fields.get(work_type_field or "")
-            or ""
-        )
-        work_type = SupportStatsGetter._simple_value(work_type_raw)
+        issuetype_raw = (fields.get("issuetype") or {}).get("name")
+        issuetype = SupportStatsGetter._simple_value(issuetype_raw) or "Support"
 
         histories = sorted(
             changelog, key=lambda h: h.get("created") or datetime.datetime.min, reverse=True
@@ -496,9 +476,8 @@ def make_jira_ticket_calendar(
                     prio_pos = PRIORITY_POS_MAP.get(priority, 0)
                 elif field in {req_field_lower, "request type"}:
                     req_type = SupportStatsGetter._simple_value(prev_val)
-                    issue_cat = issue_category_map.get(req_type) if req_type else None
-                elif field in work_field_aliases:
-                    work_type = SupportStatsGetter._simple_value(prev_val)
+                elif field in {issuetype_field_lower, "issue type"}:
+                    issuetype = SupportStatsGetter._simple_value(prev_val) or "Support"
 
         return (
             status,
@@ -509,8 +488,7 @@ def make_jira_ticket_calendar(
             priority,
             prio_pos,
             req_type,
-            issue_cat,
-            work_type,
+            issuetype,
         )
 
     (
@@ -522,8 +500,7 @@ def make_jira_ticket_calendar(
         priority_txt,
         priority_pos,
         request_type,
-        issue_category,
-        work_type,
+        issuetype,
     ) = derive_initial_state()
 
     adjusted_days = 0
@@ -564,8 +541,7 @@ def make_jira_ticket_calendar(
         day_start_priority_txt = priority_txt
         day_start_priority_pos = priority_pos
         day_start_request_type = request_type
-        day_start_issue_category = issue_category
-        day_start_work_type = work_type
+        day_start_issuetype = issuetype or "Support"
         day_escalated_priority = False
         pending_escalation_ts: datetime.datetime | None = None
 
@@ -611,10 +587,9 @@ def make_jira_ticket_calendar(
                         assigned_group = group_from_labels(labels) or assigned_group
                     elif field and field.lower() in {req_field_lower, "request type"}:
                         request_type = to_string or request_type
-                        issue_category = issue_category_map.get(request_type) if request_type else issue_category
-                    elif field and field.lower() in work_field_aliases:
+                    elif field and field.lower() in {issuetype_field_lower, "issue type"}:
                         to_val = to_string if to_string is not None else item.get("to")
-                        work_type = SupportStatsGetter._simple_value(to_val)
+                        issuetype = SupportStatsGetter._simple_value(to_val) or "Support"
             idx += 1
 
         if pending_escalation_ts:
@@ -639,10 +614,8 @@ def make_jira_ticket_calendar(
             end_priority_pos=priority_pos,
             start_request_type=day_start_request_type,
             end_request_type=request_type,
-            start_work_type=day_start_work_type,
-            end_work_type=work_type,
-            start_issue_category=day_start_issue_category,
-            end_issue_category=issue_category,
+            start_issuetype=day_start_issuetype or "Support",
+            end_issuetype=issuetype or "Support",
             start_status=day_start_status,
             end_status=start_status,
             time_spent_min=day_time,
@@ -730,8 +703,7 @@ class DatabaseStore:
             Column("first_response_time_minutes", Integer),
             Column("resolution_time_days", Float),
             Column("request_type", String),
-            Column("work_type", String),
-            Column("issue_category", String),
+            Column("issuetype", String),
             Column("deployment_type", String),
             Column("organizations", Text),
             Column("primary_organization", String),
@@ -803,10 +775,8 @@ class DatabaseStore:
             Column("end_assigned_user_email", String),
             Column("start_request_type", String),
             Column("end_request_type", String),
-            Column("start_work_type", String),
-            Column("end_work_type", String),
-            Column("start_issue_category", String),
-            Column("end_issue_category", String),
+            Column("start_issuetype", String),
+            Column("end_issuetype", String),
             Column("did_escalate_priority", Boolean),
             Column("did_escalate_cs", Boolean),
             Column("did_escalate_management", Boolean),
@@ -931,11 +901,12 @@ class DatabaseStore:
             reporting_request_type_filter = ""
             active_request_type_filter = ""
 
-        aged_request_type_filter += " AND (jt.work_type IS NULL OR LOWER(jt.work_type) = 'support')"
-        calendar_request_type_filter += " AND (jt.work_type IS NULL OR LOWER(jt.work_type) = 'support')"
-        tickets_request_type_filter += " AND (jt.work_type IS NULL OR LOWER(jt.work_type) = 'support')"
-        reporting_request_type_filter += " AND (jtr.work_type IS NULL OR LOWER(jtr.work_type) = 'support')"
-        active_request_type_filter += " AND (jtaw.work_type IS NULL OR LOWER(jtaw.work_type) = 'support')"
+        calendar_support_filter = (
+            " AND LOWER(COALESCE(jt.issuetype, jc.end_issuetype, jc.start_issuetype, '')) = 'support'"
+        )
+        tickets_support_filter = " AND LOWER(COALESCE(jt.issuetype, '')) = 'support'"
+        reporting_support_filter = " AND LOWER(COALESCE(jtr.issuetype, '')) = 'support'"
+        active_support_filter = " AND LOWER(COALESCE(jtaw.issuetype, '')) = 'support'"
 
         # create a view exposing reporting month and quarter columns
         view_sql = f"""
@@ -993,10 +964,8 @@ class DatabaseStore:
                 jc.end_assigned_user_email,
                 jc.start_request_type,
                 jc.end_request_type,
-                jc.start_work_type,
-                jc.end_work_type,
-                jc.start_issue_category,
-                jc.end_issue_category,
+                jc.start_issuetype,
+                jc.end_issuetype,
                 jc.did_escalate_priority,
                 jc.did_escalate_cs,
                 jc.did_escalate_management,
@@ -1073,6 +1042,7 @@ class DatabaseStore:
                     JOIN week_reporting wr ON wr.calendar_week = active_week
                     WHERE COALESCE(status, '') != 'Cancelled'
                       {active_request_type_filter}
+                      {active_support_filter}
                     GROUP BY wr.{period_col}
                 ),
                 friday_week AS (
@@ -1094,6 +1064,7 @@ class DatabaseStore:
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
                       {calendar_request_type_filter}
+                      {calendar_support_filter}
                     GROUP BY jc.cw
                 ),
                 friday AS (
@@ -1117,6 +1088,7 @@ class DatabaseStore:
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
                       {calendar_request_type_filter}
+                      {calendar_support_filter}
                     GROUP BY wr.{period_col}
                 ),
                 escalated AS (
@@ -1129,6 +1101,7 @@ class DatabaseStore:
                       AND COALESCE(jt.status, '') != 'Cancelled'
                       AND jc.is_junk != 1
                       {calendar_request_type_filter}
+                      {calendar_support_filter}
                     GROUP BY wr.{period_col}
                 ),
                 newt AS (
@@ -1137,6 +1110,7 @@ class DatabaseStore:
                     JOIN week_reporting wr ON wr.calendar_week = jt.created_week
                     WHERE COALESCE(jt.status, '') != 'Cancelled'
                       {tickets_request_type_filter}
+                      {tickets_support_filter}
                     GROUP BY wr.{period_col}
                 ),
                 closed AS (
@@ -1159,6 +1133,7 @@ class DatabaseStore:
                     WHERE jtr.resolved_week IS NOT NULL
                       AND COALESCE(jtr.status, '') != 'Cancelled'
                       {reporting_request_type_filter}
+                      {reporting_support_filter}
                     GROUP BY wr.{period_col}
                 ),
                 median_fr AS (
@@ -1174,6 +1149,7 @@ class DatabaseStore:
                         WHERE jt.first_response_time_minutes IS NOT NULL
                           AND COALESCE(jt.status, '') != 'Cancelled'
                           {tickets_request_type_filter}
+                          {tickets_support_filter}
                     ) t
                     WHERE rn IN ((cnt + 1)/2, (cnt + 2)/2)
                     GROUP BY period
@@ -1248,9 +1224,13 @@ class DatabaseStore:
                 aged_5_subquery=aged_5_subquery,
                 aged_request_type_filter=aged_request_type_filter,
                 calendar_request_type_filter=calendar_request_type_filter,
+                calendar_support_filter=calendar_support_filter,
                 tickets_request_type_filter=tickets_request_type_filter,
+                tickets_support_filter=tickets_support_filter,
                 reporting_request_type_filter=reporting_request_type_filter,
+                reporting_support_filter=reporting_support_filter,
                 active_request_type_filter=active_request_type_filter,
+                active_support_filter=active_support_filter,
             )
 
         weekly_report_view_sql = build_summary_view_sql(
@@ -1341,12 +1321,11 @@ class DatabaseStore:
         if "request_type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN request_type VARCHAR"))
-        if "work_type" not in cols:
+        if "issuetype" not in cols:
             with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN work_type VARCHAR"))
-        if "issue_category" not in cols:
-            with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN issue_category VARCHAR"))
+                conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN issuetype VARCHAR"))
+        with self.engine.begin() as conn:
+            conn.execute(text("UPDATE jira_tickets SET issuetype = 'Support' WHERE issuetype IS NULL"))
         if "deployment_type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_tickets ADD COLUMN deployment_type VARCHAR"))
@@ -1385,18 +1364,15 @@ class DatabaseStore:
         if "end_request_type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_request_type VARCHAR"))
-        if "start_work_type" not in cols:
+        if "start_issuetype" not in cols:
             with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN start_work_type VARCHAR"))
-        if "end_work_type" not in cols:
+                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN start_issuetype VARCHAR"))
+        if "end_issuetype" not in cols:
             with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_work_type VARCHAR"))
-        if "start_issue_category" not in cols:
-            with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN start_issue_category VARCHAR"))
-        if "end_issue_category" not in cols:
-            with self.engine.begin() as conn:
-                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_issue_category VARCHAR"))
+                conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_issuetype VARCHAR"))
+        with self.engine.begin() as conn:
+            conn.execute(text("UPDATE jira_calendar SET start_issuetype = 'Support' WHERE start_issuetype IS NULL"))
+            conn.execute(text("UPDATE jira_calendar SET end_issuetype = 'Support' WHERE end_issuetype IS NULL"))
 
         cols = [c["name"] for c in inspector.get_columns("jira_comments")]
         if "public" not in cols:
@@ -1744,10 +1720,9 @@ class SupportStatsGetter:
                 fields["satisfaction_ts"] = issue_row.get("satisfaction_ts")
             if issue_row.get("work_category"):
                 fields["work category"] = issue_row.get("work_category")
-            if issue_row.get("work_type"):
-                fields["work type"] = issue_row.get("work_type")
             if issue_row.get("sentiment"):
                 fields["sentiment"] = issue_row.get("sentiment")
+            fields["issuetype"] = {"name": issue_row.get("issuetype") or "Support"}
 
             issue = {
                 "id": issue_row["id"],
@@ -1764,9 +1739,7 @@ class SupportStatsGetter:
                 updated_comments,
                 worklogs,
                 changelog,
-                self.config.issue_category_map,
                 self.config.custom_fields.get("request_type"),
-                self.config.custom_fields.get("work_type"),
             )
             with self.store.engine.begin() as conn:
                 conn.execute(
@@ -1962,16 +1935,9 @@ class SupportStatsGetter:
             req_type = self._simple_value(
                 self._field_value(fields, "request_type", ["requestType"])
             )
-            issue_cat = (
-                self.config.issue_category_map.get(req_type) if req_type else None
-            )
-            work_type = self._simple_value(
-                self._field_value(
-                    fields,
-                    "work_type",
-                    ["workType", "worktype", "work_type"],
-                )
-            )
+            issuetype = self._simple_value(
+                (fields.get("issuetype") or {}).get("name")
+            ) or "Support"
             participants = self._field_value(
                 fields, "request_participants", ["requestParticipants"]
             )
@@ -1999,8 +1965,7 @@ class SupportStatsGetter:
                     "priority": prio_txt,
                     "priority_pos": prio_pos,
                     "request_type": req_type,
-                    "work_type": work_type,
-                    "issue_category": issue_cat,
+                    "issuetype": issuetype,
                     "deployment_type": self._simple_value(
                         self._field_value(fields, "deployment_type", ["Deployment type"])
                     ),
@@ -2246,9 +2211,7 @@ if __name__ == "__main__":
                     comments,
                     worklogs,
                     changelog,
-                    getter.config.issue_category_map,
                     getter.config.custom_fields.get("request_type"),
-                    getter.config.custom_fields.get("work_type"),
                     getter.config.priority_deescalation_ignore_minutes,
                 )
                 getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
