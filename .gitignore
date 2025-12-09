@@ -10,3 +10,5 @@ config_*.json
 *.mdb
 *.accdb
 SupportStats.xlsx
+/.vscode
+/*.xlsx
