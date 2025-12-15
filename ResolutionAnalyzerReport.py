@@ -2,9 +2,23 @@ import argparse
 import re
 import time
 from datetime import datetime, date, timedelta
+from pathlib import Path
 import requests
-import openpyxl
-from openpyxl import Workbook
+from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    create_engine,
+    delete,
+    func,
+    select,
+)
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 JIRA_BASE_URL = "https://cadissoftware.atlassian.net"
 JQL_TEMPLATE = (
@@ -14,12 +28,11 @@ JQL_TEMPLATE = (
 
 MAX_COMMENTS = 3
 MAX_RESULTS_PER_PAGE = 100
-OUTPUT_FILE = f"jira_resolution_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
 session: requests.Session | None = None
 
 # Resolver alias lookup in priority order: (alias, real name, level)
-RESOLVER_ALIASES: list[tuple[str, str, int]] = [
+DEFAULT_RESOLVER_ALIASES: list[tuple[str, str, int]] = [
     ("Abdelrahman Khamis", "Abdelrahman Khamis", 1),
     ("Abdelrahman.Khamis", "Abdelrahman Khamis", 1),
     ("Ali Ahmed", "Ali Mohamed", 1),
@@ -98,6 +111,127 @@ RESOLVER_REGEX = re.compile(
 )
 
 OUTCOME_REGEX = re.compile(r"Outcome:\s*(?P<outcome>.*)", re.DOTALL)
+
+ResolverAliasRow = dict[str, str | int]
+ResolverAliasList = list[ResolverAliasRow]
+
+
+class ResolutionDatabase:
+    """Wrapper for SQLite storage of Jira resolution summaries."""
+
+    def __init__(self, db_path: Path):
+        self.engine = create_engine(f"sqlite+pysqlite:///{db_path}")
+        self.meta = MetaData()
+        self._prepare_schema()
+        self._seed_resolver_aliases()
+
+    def _prepare_schema(self):
+        self.resolution_reports = Table(
+            "resolution_reports",
+            self.meta,
+            Column("issue_key", String, primary_key=True),
+            Column("issue_id", String),
+            Column("summary", Text),
+            Column("status", String),
+            Column("issuetype", String),
+            Column("priority", String),
+            Column("request_type", String),
+            Column("organizations", Text),
+            Column("resolvers_raw", Text),
+            Column("primary_resolver", String),
+            Column("resolve_helpers", Text),
+            Column("escalated_to_level", Integer),
+            Column("solved_level", Integer),
+            Column("outcome", String),
+            Column("work_category", String),
+            Column("category", String),
+            Column("new_category", String),
+            Column("summary_block", Text),
+            Column("rationale", Text),
+            Column("updated_at", DateTime),
+        )
+        self.resolution_resolvers = Table(
+            "resolution_resolvers",
+            self.meta,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column("issue_key", String, ForeignKey("resolution_reports.issue_key")),
+            Column("resolver", String),
+            Column("resolver_index", Integer),
+            Column("resolver_level", Integer),
+        )
+        self.resolver_aliases = Table(
+            "resolver_aliases",
+            self.meta,
+            Column("alias", String, primary_key=True),
+            Column("canonical_name", String, nullable=False),
+            Column("level", Integer, nullable=False),
+            Column("priority", Integer, nullable=False),
+        )
+        self.meta.create_all(self.engine)
+
+    def _seed_resolver_aliases(self):
+        """Populate resolver_aliases table with defaults when empty."""
+        with self.engine.begin() as conn:
+            count = conn.execute(
+                select(func.count()).select_from(self.resolver_aliases)
+            ).scalar()
+            if count:
+                return
+            rows = []
+            for priority, (alias, real, level) in enumerate(DEFAULT_RESOLVER_ALIASES):
+                rows.append(
+                    {
+                        "alias": alias,
+                        "canonical_name": real,
+                        "level": level,
+                        "priority": priority,
+                    }
+                )
+            conn.execute(self.resolver_aliases.insert(), rows)
+
+    def load_resolver_aliases(self) -> ResolverAliasList:
+        """Return resolver aliases ordered by priority."""
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                select(
+                    self.resolver_aliases.c.alias,
+                    self.resolver_aliases.c.canonical_name,
+                    self.resolver_aliases.c.level,
+                    self.resolver_aliases.c.priority,
+                ).order_by(self.resolver_aliases.c.priority)
+            ).all()
+        return [
+            {
+                "alias": row.alias,
+                "alias_cf": row.alias.casefold().strip(),
+                "canonical_name": row.canonical_name,
+                "level": row.level,
+                "priority": row.priority,
+            }
+            for row in rows
+        ]
+
+    def upsert_issue(self, issue_row: dict, resolver_rows: list[dict]) -> None:
+        """Insert or update an issue and replace its resolver rows atomically."""
+        with self.engine.begin() as conn:
+            stmt = sqlite_insert(self.resolution_reports).values(issue_row)
+            update_cols = {
+                col.name: stmt.excluded[col.name]
+                for col in self.resolution_reports.columns
+                if col.name != "issue_key"
+            }
+            conn.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=["issue_key"], set_=update_cols
+                )
+            )
+            conn.execute(
+                delete(self.resolution_resolvers).where(
+                    self.resolution_resolvers.c.issue_key == issue_row["issue_key"]
+                )
+            )
+            if resolver_rows:
+                conn.execute(self.resolution_resolvers.insert(), resolver_rows)
 
 
 def extract_resolution_data(comment_body: str):
@@ -225,24 +359,31 @@ def adf_to_text(node):
     return _inner(node).strip()
 
 
-def map_resolver(name: str) -> tuple[str, int] | None:
+def map_resolver(name: str, aliases: ResolverAliasList) -> tuple[str, int] | None:
     """Map resolver alias to canonical name and level using priority list."""
     name_cf = name.casefold().strip()
-    for alias, real, level in RESOLVER_ALIASES:
-        alias_cf = alias.casefold().strip()
-        if alias_cf in name_cf:
-            return real, level
+    for alias in aliases:
+        if alias["alias_cf"] in name_cf:
+            return str(alias["canonical_name"]), int(alias["level"])
     return None
 
 
-def map_resolvers_from_text(text: str) -> list[tuple[str, int]]:
+def map_resolvers_from_text(text: str, aliases: ResolverAliasList) -> list[tuple[str, int]]:
     """Map aliases found in text in order of appearance, using priority to break ties."""
     lower = text.casefold()
     hits: list[tuple[int, int, str, int]] = []
-    for idx, (alias, real, level) in enumerate(RESOLVER_ALIASES):
-        pos = lower.find(alias.casefold().strip())
+    for alias in aliases:
+        alias_cf = str(alias["alias_cf"])
+        pos = lower.find(alias_cf)
         if pos != -1:
-            hits.append((pos, idx, real, level))
+            hits.append(
+                (
+                    pos,
+                    int(alias["priority"]),
+                    str(alias["canonical_name"]),
+                    int(alias["level"]),
+                )
+            )
     hits.sort(key=lambda x: (x[0], x[1]))  # order of appearance, then alias priority
 
     ordered: list[tuple[str, int]] = []
@@ -280,7 +421,7 @@ def request_with_retry(method: str, url: str, max_attempts: int = 5, **kwargs) -
 def main():
     global JIRA_BASE_URL, session
 
-    parser = argparse.ArgumentParser(description="Export Jira resolution summaries.")
+    parser = argparse.ArgumentParser(description="Export Jira resolution summaries to SQLite.")
     parser.add_argument("--email", required=True, help="Jira user email (for basic auth)")
     parser.add_argument("--token", required=True, help="Jira API token")
     parser.add_argument("--url", default=JIRA_BASE_URL, help="Jira base URL")
@@ -295,6 +436,11 @@ def main():
     parser.add_argument(
         "--jql",
         help="Override the generated JQL entirely. If set, start/end date options are ignored.",
+    )
+    parser.add_argument(
+        "--db-path",
+        default="resolution_reports.sqlite",
+        help="Path to the SQLite database file.",
     )
     args = parser.parse_args()
 
@@ -322,33 +468,8 @@ def main():
             end=end_date.strftime("%Y-%m-%d"),
         )
 
-    # Excel Setup
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Jira Rovo Extract"
-
-    ws.append(
-        [
-            "key",
-            "summary",
-            "status",
-            "issuetype",
-            "priority",
-            "request_type",
-            "organizations",
-            "resolvers_raw",
-            "primary_resolver",
-            "resolve_helpers",
-            "escalated_to_level",
-            "solved_level",
-            "outcome",
-            "work_category",
-            "category",
-            "new_category",
-            "summary_block",
-            "rationale",
-        ]
-    )
+    db = ResolutionDatabase(Path(args.db_path))
+    resolver_aliases = db.load_resolver_aliases()
 
     # Process Jira issues
     issues = query_jira_issues(jql)
@@ -403,7 +524,7 @@ def main():
         resolvers_raw = ", ".join(resolvers_list)
         mapped_order: list[tuple[str, int]] = []
         for name in resolvers_list:
-            mapped = map_resolvers_from_text(name)
+            mapped = map_resolvers_from_text(name, resolver_aliases)
             mapped_order.extend(mapped)
 
         extracted_primary = mapped_order[0][0] if mapped_order else None
@@ -426,31 +547,42 @@ def main():
             else:
                 outcome_val = trimmed
 
-        ws.append(
-            [
-                key,
-                fields.get("summary"),
-                fields.get("status", {}).get("name"),
-                fields.get("issuetype", {}).get("name"),
-                fields.get("priority", {}).get("name"),
-                request_type,
-                organizations,
-                resolvers_raw,
-                extracted_primary,
-                "; ".join(resolve_helpers_mapped) if resolve_helpers_mapped else None,
-                escalated_level,
-                extracted_primary_level,
-                outcome_val,
-                work_category,
-                extracted["category"],
-                extracted["new_category"],
-                extracted["summary"],
-                extracted["rationale"],
-            ]
-        )
+        issue_row = {
+            "issue_key": key,
+            "issue_id": issue.get("id"),
+            "summary": fields.get("summary"),
+            "status": fields.get("status", {}).get("name"),
+            "issuetype": fields.get("issuetype", {}).get("name"),
+            "priority": fields.get("priority", {}).get("name"),
+            "request_type": request_type,
+            "organizations": organizations,
+            "resolvers_raw": resolvers_raw,
+            "primary_resolver": extracted_primary,
+            "resolve_helpers": "; ".join(resolve_helpers_mapped) if resolve_helpers_mapped else None,
+            "escalated_to_level": escalated_level,
+            "solved_level": extracted_primary_level,
+            "outcome": outcome_val,
+            "work_category": work_category,
+            "category": extracted["category"],
+            "new_category": extracted["new_category"],
+            "summary_block": extracted["summary"],
+            "rationale": extracted["rationale"],
+            "updated_at": datetime.now(),
+        }
 
-    wb.save(OUTPUT_FILE)
-    print(f"Done. Exported {len(issues)} issues -> {OUTPUT_FILE}")
+        resolver_rows = [
+            {
+                "issue_key": key,
+                "resolver": resolver_name,
+                "resolver_index": idx + 1,
+                "resolver_level": level,
+            }
+            for idx, (resolver_name, level) in enumerate(mapped_order)
+        ]
+
+        db.upsert_issue(issue_row, resolver_rows)
+
+    print(f"Done. Upserted {len(issues)} issues into {args.db_path}")
 
 
 if __name__ == "__main__":
