@@ -944,19 +944,12 @@ class DatabaseStore:
             self.meta,
             Column("ticket_id", String, ForeignKey("jira_tickets.id"), primary_key=True),
             Column("issue_key", String),
-            Column("summary", Text),
-            Column("status", String),
-            Column("issuetype", String),
-            Column("priority", String),
-            Column("request_type", String),
-            Column("organizations", Text),
             Column("resolvers_raw", Text),
             Column("primary_resolver", String),
             Column("resolve_helpers", Text),
             Column("escalated_to_level", Integer),
             Column("solved_level", Integer),
             Column("outcome", String),
-            Column("work_category", String),
             Column("category", String),
             Column("new_category", String),
             Column("summary_block", Text),
@@ -1001,6 +994,7 @@ class DatabaseStore:
         )
         self.meta.create_all(self.engine)
         self._seed_resolver_aliases()
+        self._drop_resolution_report_columns()
 
         # populate week to reporting month/quarter lookup
         with self.engine.begin() as conn:
@@ -1062,6 +1056,32 @@ class DatabaseStore:
                 )
             conn.execute(self.resolver_aliases.insert(), rows)
 
+    def _drop_resolution_report_columns(self) -> None:
+        """Drop legacy columns that duplicate jira_tickets fields."""
+        inspector = sa_inspect(self.engine)
+        if "resolution_reports" not in inspector.get_table_names():
+            return
+        cols = [c["name"] for c in inspector.get_columns("resolution_reports")]
+        to_drop = {
+            "summary",
+            "status",
+            "issuetype",
+            "priority",
+            "request_type",
+            "organizations",
+            "work_category",
+        }
+        for col in sorted(to_drop):
+            if col in cols:
+                with self.engine.begin() as conn:
+                    try:
+                        conn.execute(text(f"ALTER TABLE resolution_reports DROP COLUMN {col}"))
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "Failed to drop column %s from resolution_reports", col
+                        )
+
+        with self.engine.begin() as conn:
             self._drop_view_if_exists(conn, "reporting_weeks")
             conn.execute(text("CREATE VIEW reporting_weeks AS SELECT * FROM week_reporting"))
 
@@ -1117,6 +1137,15 @@ class DatabaseStore:
             CREATE VIEW jira_tickets_reporting AS
             SELECT
                 jt.*,
+                rr.primary_resolver,
+                rr.resolve_helpers,
+                rr.escalated_to_level,
+                rr.solved_level,
+                rr.outcome,
+                rr.category,
+                rr.new_category,
+                rr.summary_block,
+                rr.rationale,
                 {is_junk_expr} AS is_junk,
                 {request_type_expr} AS request_type_category,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingmonth,
@@ -1130,6 +1159,7 @@ class DatabaseStore:
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.last_response_date_week) AS last_response_date_reportingmonth,
                 (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.last_response_date_week) AS last_response_date_reportingquarter
             FROM jira_tickets jt
+            LEFT JOIN resolution_reports rr ON rr.ticket_id = jt.id
         """
         with self.engine.begin() as conn:
             self._drop_view_if_exists(conn, "jira_tickets_reporting")
@@ -2386,18 +2416,22 @@ class SupportStatsGetter:
                     break
 
         if not extracted:
-            extracted = {
-                "category": None,
-                "summary": None,
-                "rationale": None,
-                "new_category": None,
-                "primary_resolver": None,
-                "resolve_helpers": None,
-                "outcome": None,
-                "resolvers": [],
-            }
-        else:
-            extracted.setdefault("resolvers", extracted.get("resolvers", []))
+            ticket_id = issue.get("id")
+            if ticket_id:
+                with self.store.engine.begin() as conn:
+                    conn.execute(
+                        delete(self.store.resolution_resolvers).where(
+                            self.store.resolution_resolvers.c.ticket_id == ticket_id
+                        )
+                    )
+                    conn.execute(
+                        delete(self.store.resolution_reports).where(
+                            self.store.resolution_reports.c.ticket_id == ticket_id
+                        )
+                    )
+            return
+
+        extracted.setdefault("resolvers", extracted.get("resolvers", []))
 
         resolvers_list = extracted.get("resolvers") or []
         resolvers_raw = ", ".join(resolvers_list)
@@ -2424,35 +2458,15 @@ class SupportStatsGetter:
             else:
                 outcome_val = trimmed
 
-        request_type = self._simple_value(
-            self._field_value(fields, "request_type", ["requestType"])
-        )
-        organizations = self._simple_value(
-            self._field_value(fields, "organizations", ["Organizations"])
-        )
-        work_category = self._simple_value(
-            self._field_value(fields, "work_category", ["work category"])
-        )
-        issuetype_val = fields.get("issuetype")
-        if isinstance(issuetype_val, dict):
-            issuetype_val = issuetype_val.get("name")
-
         report_row = {
             "ticket_id": issue.get("id"),
             "issue_key": issue.get("key"),
-            "summary": fields.get("summary"),
-            "status": (fields.get("status") or {}).get("name"),
-            "issuetype": self._simple_value(issuetype_val),
-            "priority": (fields.get("priority") or {}).get("name"),
-            "request_type": request_type,
-            "organizations": organizations,
             "resolvers_raw": resolvers_raw,
             "primary_resolver": extracted_primary,
             "resolve_helpers": "; ".join(resolve_helpers_mapped) if resolve_helpers_mapped else None,
             "escalated_to_level": escalated_level,
             "solved_level": extracted_primary_level,
             "outcome": outcome_val,
-            "work_category": work_category,
             "category": extracted.get("category"),
             "new_category": extracted.get("new_category"),
             "summary_block": extracted.get("summary"),
