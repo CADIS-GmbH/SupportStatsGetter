@@ -78,6 +78,87 @@ DEFAULT_NON_SUPPORT_REQUEST_TYPES = [
     "Licensing and billing questions"
 ]
 
+# Maximum number of latest comments to inspect for the resolution summary block.
+MAX_RESOLUTION_COMMENTS = 10
+
+# Resolver alias lookup in priority order: (alias, real name, level)
+DEFAULT_RESOLVER_ALIASES: list[tuple[str, str, int]] = [
+    ("Abdelrahman Khamis", "Abdelrahman Khamis", 1),
+    ("Abdelrahman.Khamis", "Abdelrahman Khamis", 1),
+    ("Ali Ahmed", "Ali Mohamed", 1),
+    ("Ali Mohamed", "Ali Mohamed", 1),
+    ("Ali.Mohamed", "Ali Mohamed", 1),
+    ("Anne Leske", "Anne Leske", 3),
+    ("Anne.Leske", "Anne Leske", 3),
+    ("Benedikt Wagner", "Benedikt Wagner", 2),
+    ("Benedikt.Wagner", "Benedikt Wagner", 2),
+    ("Erik von R\u30b0sten", "Erik von R\u30b0sten", 3),
+    ("Erik.vonR\u30b0sten", "Erik von R\u30b0sten", 3),
+    ("Inge Emmerichs", "Inge Emmerichs", 3),
+    ("Inge.Emmerichs", "Inge Emmerichs", 3),
+    ("Isabelle Lernbass", "Isabelle Lernbass", 3),
+    ("Isabelle.Lernbass", "Isabelle Lernbass", 3),
+    ("Johannes Arneth", "Johannes Arneth", 3),
+    ("Johannes.Arneth", "Johannes Arneth", 3),
+    ("Julian Beyer", "Julian Beyer", 2),
+    ("Julian.Beyer", "Julian Beyer", 2),
+    ("Mohamed Shebl", "Mohamed Shebl", 1),
+    ("Mohamed.Shebl", "Mohamed Shebl", 1),
+    ("Nermine Rashad", "Nermine Rashad", 1),
+    ("Nermine.Rashad", "Nermine Rashad", 1),
+    ("M\u30b0ller", "Ullrich M\u30b0ller", 3),
+    ("Ulli M\u30b0ller", "Ullrich M\u30b0ller", 3),
+    ("Ulli.M\u30b0ller", "Ullrich M\u30b0ller", 3),
+    ("Ullrich M\u30b0ller", "Ullrich M\u30b0ller", 3),
+    ("Ullrich.M\u30b0ller", "Ullrich M\u30b0ller", 3),
+    ("Winfried Gillich", "Winfried Gillich", 3),
+    ("Winfried.Gillich", "Winfried Gillich", 3),
+    ("Gillich", "Winfried Gillich", 3),
+    ("Franz Renger", "Franz Renger", 3),
+    ("Franz.Renger", "Franz Renger", 3),
+    ("Khalil Boukhdoud", "Khalil Boukhdoud", 3),
+    ("Khalil.Boukhdoud", "Khalil Boukhdoud", 3),
+    ("Stephan Schneider", "Stephan Schneider", 2),
+    ("Stephan.Schneider", "Stephan Schneider", 2),
+    ("Stefan Lieth", "Stefan Lieth", 3),
+    ("Stefan.Lieth", "Stefan Lieth", 3),
+    ("Hamud.AlHammoud", "Hamud Al Hammoud", 3),
+    ("Hamud Al Hammoud", "Hamud Al Hammoud", 3),
+    ("Al Hammoud, Hamud", "Hamud Al Hammoud", 3),
+    ("Andr\u30bc Hinz", "Andr\u30bc Hinz", 3),
+    ("Andre Hinz", "Andr\u30bc Hinz", 3),
+    ("Andr\u30bc.Hinz", "Andr\u30bc Hinz", 3),
+    ("Andre.Hinz", "Andr\u30bc Hinz", 3),
+    ("Cornelia Hagner", "Cornelia Hagner", 3),
+    ("Cornelia.Hagner", "Cornelia Hagner", 3),
+    ("Gillich, Winfried", "Winfried Gillich", 3),
+    ("M\u30b0ller, Ullrich", "Ullrich M\u30b0ller", 3),
+    ("Thomas.Wagner", "Thomas Wagner", 2),
+    ("Thomas Wagner", "Thomas Wagner", 2),
+    ("Armin Dobner", "Armin Dobner", 3),
+    ("Armin.Dobner", "Armin Dobner", 3),
+    ("Martin.G\u0411rick", "Martin G\u0411rick", 3),
+    ("Martin G\u0411rick", "Martin G\u0411rick", 3),
+]
+
+# ------------------------------
+# Regex to extract structured fields for resolution summaries
+# ------------------------------
+RESOLUTION_BLOCK_REGEX = re.compile(
+    r"Resolution Summary by Rovo:.*?"
+    r"Category:\s*(?P<category>.*?)(?=Summary:)"
+    r"Summary:\s*(?P<summary>.*?)(?=Rationale:)"
+    r"Rationale:\s*(?P<rationale>.*?)(?=Suggested new category:|Resolver:|Outcome:)",
+    re.DOTALL,
+)
+RESOLUTION_OPTIONAL_NEW_CATEGORY = re.compile(
+    r"Suggested new category:\s*(?P<newcat>.*?)(?=Resolver:|Outcome:)", re.DOTALL
+)
+RESOLUTION_RESOLVER_REGEX = re.compile(
+    r"Resolver:\s*(?P<resolver_line>.*?)(?=Outcome:)", re.DOTALL
+)
+RESOLUTION_OUTCOME_REGEX = re.compile(r"Outcome:\s*(?P<outcome>.*)", re.DOTALL)
+
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
 JIRA_PULL_OVERLAP_MIN = 5 #60*24*7  #5
 
@@ -395,6 +476,66 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     else:
         result["ResolutionTimeDays"] = None
     return result
+
+
+def extract_resolution_data(comment_body: str) -> dict[str, Any] | None:
+    """Extracts structured fields from a resolution summary block in a comment."""
+    block = RESOLUTION_BLOCK_REGEX.search(comment_body)
+    if not block:
+        return None
+
+    data = block.groupdict()
+    newcat_match = RESOLUTION_OPTIONAL_NEW_CATEGORY.search(comment_body)
+    data["new_category"] = newcat_match.group("newcat").strip() if newcat_match else None
+
+    resolver_match = RESOLUTION_RESOLVER_REGEX.search(comment_body)
+    if resolver_match:
+        resolvers = resolver_match.group("resolver_line").strip()
+        resolver_list = [r.strip() for r in resolvers.split(",") if r.strip()]
+        data["resolvers"] = resolver_list
+        data["primary_resolver"] = resolver_list[0] if resolver_list else None
+        data["resolve_helpers"] = resolver_list[1:] if len(resolver_list) > 1 else []
+    else:
+        data["resolvers"] = []
+        data["primary_resolver"] = None
+        data["resolve_helpers"] = []
+
+    outcome_match = RESOLUTION_OUTCOME_REGEX.search(comment_body)
+    data["outcome"] = outcome_match.group("outcome").strip() if outcome_match else None
+
+    for key in ["category", "summary", "rationale"]:
+        if data.get(key):
+            data[key] = data[key].strip()
+
+    return data
+
+
+def map_resolvers_from_text(text: str, aliases: list[dict[str, Any]]) -> list[tuple[str, int]]:
+    """Map aliases found in text in order of appearance, using priority to break ties."""
+    lower = text.casefold()
+    hits: list[tuple[int, int, str, int]] = []
+    for alias in aliases:
+        alias_cf = str(alias["alias_cf"])
+        pos = lower.find(alias_cf)
+        if pos != -1:
+            hits.append(
+                (
+                    pos,
+                    int(alias["priority"]),
+                    str(alias["canonical_name"]),
+                    int(alias["level"]),
+                )
+            )
+    hits.sort(key=lambda x: (x[0], x[1]))
+
+    ordered: list[tuple[str, int]] = []
+    seen = set()
+    for _, _, real, level in hits:
+        if real not in seen:
+            ordered.append((real, level))
+            seen.add(real)
+
+    return ordered
 
 
 def make_jira_ticket_calendar(
@@ -798,6 +939,47 @@ class DatabaseStore:
             Column("weekday", Integer),
             Column("date_modified", DateTime),
         )
+        self.resolution_reports = Table(
+            "resolution_reports",
+            self.meta,
+            Column("ticket_id", String, ForeignKey("jira_tickets.id"), primary_key=True),
+            Column("issue_key", String),
+            Column("summary", Text),
+            Column("status", String),
+            Column("issuetype", String),
+            Column("priority", String),
+            Column("request_type", String),
+            Column("organizations", Text),
+            Column("resolvers_raw", Text),
+            Column("primary_resolver", String),
+            Column("resolve_helpers", Text),
+            Column("escalated_to_level", Integer),
+            Column("solved_level", Integer),
+            Column("outcome", String),
+            Column("work_category", String),
+            Column("category", String),
+            Column("new_category", String),
+            Column("summary_block", Text),
+            Column("rationale", Text),
+            Column("updated_at", DateTime),
+        )
+        self.resolution_resolvers = Table(
+            "resolution_resolvers",
+            self.meta,
+            Column("id", Integer, primary_key=True),
+            Column("ticket_id", String, ForeignKey("resolution_reports.ticket_id")),
+            Column("resolver", String),
+            Column("resolver_index", Integer),
+            Column("resolver_level", Integer),
+        )
+        self.resolver_aliases = Table(
+            "resolver_aliases",
+            self.meta,
+            Column("alias", String, primary_key=True),
+            Column("canonical_name", String),
+            Column("level", Integer),
+            Column("priority", Integer),
+        )
         self.internal_users = Table(
             "internal_users",
             self.meta,
@@ -818,6 +1000,7 @@ class DatabaseStore:
             Column("reporting_quarter", String),
         )
         self.meta.create_all(self.engine)
+        self._seed_resolver_aliases()
 
         # populate week to reporting month/quarter lookup
         with self.engine.begin() as conn:
@@ -858,6 +1041,26 @@ class DatabaseStore:
                         }
                     )
                 conn.execute(self.week_reporting.insert(), rows)
+
+    def _seed_resolver_aliases(self) -> None:
+        """Populate resolver_aliases table with default values when empty."""
+        with self.engine.begin() as conn:
+            count = conn.execute(
+                select(func.count()).select_from(self.resolver_aliases)
+            ).scalar()
+            if count:
+                return
+            rows = []
+            for priority, (alias, real, level) in enumerate(DEFAULT_RESOLVER_ALIASES):
+                rows.append(
+                    {
+                        "alias": alias,
+                        "canonical_name": real,
+                        "level": level,
+                        "priority": priority,
+                    }
+                )
+            conn.execute(self.resolver_aliases.insert(), rows)
 
             self._drop_view_if_exists(conn, "reporting_weeks")
             conn.execute(text("CREATE VIEW reporting_weeks AS SELECT * FROM week_reporting"))
@@ -1459,6 +1662,51 @@ class DatabaseStore:
         return compiled
 
     @log_call
+    def load_resolver_aliases(self) -> list[dict[str, Any]]:
+        inspector = sa_inspect(self.engine)
+        if "resolver_aliases" not in inspector.get_table_names():
+            return []
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(
+                    self.resolver_aliases.c.alias,
+                    self.resolver_aliases.c.canonical_name,
+                    self.resolver_aliases.c.level,
+                    self.resolver_aliases.c.priority,
+                ).order_by(self.resolver_aliases.c.priority)
+            ).fetchall()
+        return [
+            {
+                "alias": row.alias,
+                "alias_cf": row.alias.casefold().strip(),
+                "canonical_name": row.canonical_name,
+                "level": row.level,
+                "priority": row.priority,
+            }
+            for row in rows
+        ]
+
+    @log_call
+    def upsert_resolution_report(
+        self,
+        report_row: dict[str, Any],
+        resolver_rows: Iterable[dict[str, Any]],
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                self.resolution_reports.insert().prefix_with("OR REPLACE"),
+                [report_row],
+            )
+            conn.execute(
+                delete(self.resolution_resolvers).where(
+                    self.resolution_resolvers.c.ticket_id == report_row["ticket_id"]
+                )
+            )
+            resolver_rows = list(resolver_rows)
+            if resolver_rows:
+                conn.execute(self.resolution_resolvers.insert(), resolver_rows)
+
+    @log_call
     def get_ticket_with_related(self, ticket_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         """Load a ticket and related records from the database."""
         with self.engine.connect() as conn:
@@ -1540,6 +1788,7 @@ class SupportStatsGetter:
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
         global ORG_PATTERNS
         ORG_PATTERNS = self.store.load_org_patterns()
+        self.resolver_aliases = self.store.load_resolver_aliases()
 
     def _field_value(
         self,
@@ -1735,6 +1984,7 @@ class SupportStatsGetter:
             }
             processed_issue = calculate_kpi_fields(issue, updated_comments, changelog)
             self.store_jira_tickets([processed_issue])
+            self.process_resolution_report(issue, updated_comments)
             calendar_rows = make_jira_ticket_calendar(
                 processed_issue,
                 updated_comments,
@@ -2087,9 +2337,141 @@ class SupportStatsGetter:
                         "from_string": item.get("fromString"),
                         "to_value": item.get("to"),
                         "to_string": item.get("toString"),
-                    }
-                )
+                }
+            )
         self.store.insert_many(self.store.jira_changelog, records)
+
+    def _comment_body_to_text(self, comment: Mapping[str, Any]) -> str:
+        raw_body = comment.get("body")
+        rendered = comment.get("renderedBody")
+        body = ""
+        if isinstance(raw_body, dict):
+            body = self._adf_to_text(raw_body)
+        elif isinstance(raw_body, str):
+            body = raw_body
+            if raw_body.lstrip().startswith("{"):
+                try:
+                    parsed = json.loads(raw_body)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    body = self._adf_to_text(parsed)
+        if not body and rendered:
+            body = str(rendered)
+        return body or ""
+
+    def process_resolution_report(
+        self,
+        issue: Mapping[str, Any],
+        comments: Iterable[Mapping[str, Any]],
+    ) -> None:
+        fields = issue.get("fields", {}) if isinstance(issue, Mapping) else {}
+        def comment_sort_key(comment: Mapping[str, Any]) -> datetime.datetime:
+            created = comment.get("created")
+            if isinstance(created, datetime.datetime):
+                if created.tzinfo is None:
+                    return created.replace(tzinfo=datetime.UTC)
+                return created
+            return datetime.datetime.min.replace(tzinfo=datetime.UTC)
+
+        comments_sorted = sorted(comments, key=comment_sort_key)
+        recent_comments = comments_sorted[-MAX_RESOLUTION_COMMENTS:]
+        extracted = None
+
+        for comment in reversed(recent_comments):
+            body = self._comment_body_to_text(comment)
+            if "Resolution Summary by Rovo:" in body:
+                extracted = extract_resolution_data(body)
+                if extracted:
+                    break
+
+        if not extracted:
+            extracted = {
+                "category": None,
+                "summary": None,
+                "rationale": None,
+                "new_category": None,
+                "primary_resolver": None,
+                "resolve_helpers": None,
+                "outcome": None,
+                "resolvers": [],
+            }
+        else:
+            extracted.setdefault("resolvers", extracted.get("resolvers", []))
+
+        resolvers_list = extracted.get("resolvers") or []
+        resolvers_raw = ", ".join(resolvers_list)
+        mapped_order: list[tuple[str, int]] = []
+        for name in resolvers_list:
+            mapped_order.extend(map_resolvers_from_text(name, self.resolver_aliases))
+
+        extracted_primary = mapped_order[0][0] if mapped_order else None
+        extracted_primary_level = mapped_order[0][1] if mapped_order else None
+        resolve_helpers_mapped = [n for n, _ in mapped_order[1:]] if len(mapped_order) > 1 else []
+        all_levels = [lvl for _, lvl in mapped_order]
+        escalated_level = max(all_levels) if all_levels else None
+
+        outcome_val = extracted.get("outcome")
+        if isinstance(outcome_val, str):
+            trimmed = outcome_val.strip()
+            lowered = trimmed.casefold()
+            if lowered.startswith("abandoned"):
+                outcome_val = "Abandoned"
+            elif lowered.startswith("solved"):
+                outcome_val = "Solved"
+            elif lowered.startswith("not solved"):
+                outcome_val = "Not Solved"
+            else:
+                outcome_val = trimmed
+
+        request_type = self._simple_value(
+            self._field_value(fields, "request_type", ["requestType"])
+        )
+        organizations = self._simple_value(
+            self._field_value(fields, "organizations", ["Organizations"])
+        )
+        work_category = self._simple_value(
+            self._field_value(fields, "work_category", ["work category"])
+        )
+        issuetype_val = fields.get("issuetype")
+        if isinstance(issuetype_val, dict):
+            issuetype_val = issuetype_val.get("name")
+
+        report_row = {
+            "ticket_id": issue.get("id"),
+            "issue_key": issue.get("key"),
+            "summary": fields.get("summary"),
+            "status": (fields.get("status") or {}).get("name"),
+            "issuetype": self._simple_value(issuetype_val),
+            "priority": (fields.get("priority") or {}).get("name"),
+            "request_type": request_type,
+            "organizations": organizations,
+            "resolvers_raw": resolvers_raw,
+            "primary_resolver": extracted_primary,
+            "resolve_helpers": "; ".join(resolve_helpers_mapped) if resolve_helpers_mapped else None,
+            "escalated_to_level": escalated_level,
+            "solved_level": extracted_primary_level,
+            "outcome": outcome_val,
+            "work_category": work_category,
+            "category": extracted.get("category"),
+            "new_category": extracted.get("new_category"),
+            "summary_block": extracted.get("summary"),
+            "rationale": extracted.get("rationale"),
+            "updated_at": datetime.datetime.now(datetime.UTC),
+        }
+        if not report_row["ticket_id"]:
+            return
+
+        resolver_rows = [
+            {
+                "ticket_id": report_row["ticket_id"],
+                "resolver": resolver_name,
+                "resolver_index": idx + 1,
+                "resolver_level": level,
+            }
+            for idx, (resolver_name, level) in enumerate(mapped_order)
+        ]
+        self.store.upsert_resolution_report(report_row, resolver_rows)
 
     @staticmethod
     def _adf_to_text(node: Any) -> str:
@@ -2206,6 +2588,7 @@ if __name__ == "__main__":
                 getter.store_jira_comments(issue["id"], issue.get("key"), comments)
                 getter.store_jira_worklogs(issue["id"], worklogs)
                 getter.store_jira_changelog(issue["id"], changelog)
+                getter.process_resolution_report(issue, comments)
 
                 calendar_rows = make_jira_ticket_calendar(
                     issue,
