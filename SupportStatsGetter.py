@@ -574,13 +574,14 @@ def make_jira_ticket_calendar(
                         priority_txt = to_string or priority_txt
                         priority_pos = PRIORITY_POS_MAP.get(priority_txt, 0)
                         delta = priority_pos - prev_priority_pos
-                        if delta > 0:
+                        if delta > 0 and priority_pos > 0: #only count if the ne prority is higher than 0 (A, AA)
                             pending_escalation_ts = ts
                         elif delta < 0 and pending_escalation_ts:
                             if ts - pending_escalation_ts <= escalation_grace:
                                 pending_escalation_ts = None
                             else:
-                                day_escalated_priority = True
+                                if priority_pos > 0:    #only count if the ne prority is higher than 0 (A, AA)
+                                    day_escalated_priority = True
                                 pending_escalation_ts = None
                     elif field and field.lower() == "labels":
                         labels = [l.strip() for l in (to_string or "").split(",") if l.strip()]
