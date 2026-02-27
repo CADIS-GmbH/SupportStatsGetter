@@ -1,0 +1,11 @@
+{
+    "sqltools.useNodeRuntime": true,
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "SQLite",
+            "name": "SupportKPI",
+            "database": "D:\\OneDrive - Valsoft Corporation\\Shared Documents - CAD - Cadis\\Customer Success\\Customer Service\\Support\\Statistics\\CADIS_JIRA_DATA\\support_stats.sqlite"
+        }
+    ]
+}

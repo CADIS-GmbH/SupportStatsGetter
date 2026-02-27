@@ -15,8 +15,8 @@ from SupportStatsGetter import (
     primary_org_from_names,
     ORG_PATTERNS,
 )
-from cadis_bdk_contacts import CADIS_BDK_CONTACTS
-from TeamSupportStatsGetter import (
+from TeamSupport_DW_BDK.cadis_bdk_contacts import CADIS_BDK_CONTACTS
+from TeamSupport_DW_BDK.TeamSupportStatsGetter import (
     STATUS_CHANGE_RE,
     GROUP_ASSIGN_RE,
     USER_ASSIGN_RE,
