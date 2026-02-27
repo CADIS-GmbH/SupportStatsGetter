@@ -1,11 +1,3 @@
-{
-    "sqltools.useNodeRuntime": true,
-    "sqltools.connections": [
-        {
-            "previewLimit": 50,
-            "driver": "SQLite",
-            "name": "SupportKPI",
-            "database": "D:\\OneDrive - Valsoft Corporation\\Shared Documents - CAD - Cadis\\Customer Success\\Customer Service\\Support\\Statistics\\CADIS_JIRA_DATA\\support_stats.sqlite"
-        }
-    ]
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:004d06a1f8f7e475aae72e7452349cb1ed79a9262460ccc88055693ae8ffdbdb
+size 383
