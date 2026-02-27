@@ -1,28 +1,3 @@
-{
-  "jira_base_url": "https://cadissoftware.atlassian.net",
-  "jira_user": "<you>>@cadissoftware.com",
-  "jira_token": "<your_token>>",
-  "db_path": "C:\\OneDrive - Valsoft Corporation\\Shared Documents - CAD - Cadis\\Customer Success\\Customer Service\\Support\\Statistics\\CADIS_JIRA_DATA\\support_stats.sqlite",
-  "base_jql": "project = \"CSM\"  ",
-  "log_level": "INFO",
-  "log_file": "support_stats.log",
-  "output_excel": "SupportStats.xlsx",
-    "excel_write_mode": "overwrite_with_backup",
-  "custom_fields": {
-    "request_type": "customfield_10010",
-    "deployment_type": "customfield_10661",
-    "organizations": "customfield_10002",
-    "satisfaction": "customfield_10060",
-    "satisfaction_ts": "customfield_10061",
-    "work_type": "customfield_12345",
-    "work_category": "customfield_10194",
-    "sentiment": "customfield_10162",
-    "time_to_close": "customfield_10695",
-    "time_to_qualified_answer": "customfield_10595",
-    "time_to_resolution": "customfield_10197"
-  },
-  "non_support_request_types": [
-    "Maintenance & Service Operations",
-    "Product trial questions"
-  ]
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:b8a64486140658ffa3cb7a6e3d342be4b044ea098545bdff1bb70be19826a65d
+size 1104
