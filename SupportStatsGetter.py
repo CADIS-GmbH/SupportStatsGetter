@@ -1370,6 +1370,42 @@ class DatabaseStore:
                       {reporting_support_filter}
                     GROUP BY wr.{period_col}
                 ),
+                resolution_report_stats AS (
+                    SELECT
+                        wr.{period_col} AS period,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level IN (1, 2, 3) THEN jtr.id END) AS rr_solved_total,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level IN (1, 2, 3) AND request_type_category = 'HW' THEN jtr.id END) AS rr_solved_hw_total,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level IN (1, 2, 3) AND request_type_category = 'SW' THEN jtr.id END) AS rr_solved_sw_total,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level IN (1, 2, 3) THEN jtr.id END) AS rr_escalated_total,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level IN (1, 2, 3) AND request_type_category = 'HW' THEN jtr.id END) AS rr_escalated_hw_total,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level IN (1, 2, 3) AND request_type_category = 'SW' THEN jtr.id END) AS rr_escalated_sw_total,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 1 THEN jtr.id END) AS solved_level1,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 2 THEN jtr.id END) AS solved_level2,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 3 THEN jtr.id END) AS solved_level3,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 1 AND request_type_category = 'HW' THEN jtr.id END) AS solved_level1_hw,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 2 AND request_type_category = 'HW' THEN jtr.id END) AS solved_level2_hw,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 3 AND request_type_category = 'HW' THEN jtr.id END) AS solved_level3_hw,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 1 AND request_type_category = 'SW' THEN jtr.id END) AS solved_level1_sw,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 2 AND request_type_category = 'SW' THEN jtr.id END) AS solved_level2_sw,
+                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 3 AND request_type_category = 'SW' THEN jtr.id END) AS solved_level3_sw,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 1 THEN jtr.id END) AS escalated_level1,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 2 THEN jtr.id END) AS escalated_level2,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 3 THEN jtr.id END) AS escalated_level3,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 1 AND request_type_category = 'HW' THEN jtr.id END) AS escalated_level1_hw,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 2 AND request_type_category = 'HW' THEN jtr.id END) AS escalated_level2_hw,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 3 AND request_type_category = 'HW' THEN jtr.id END) AS escalated_level3_hw,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 1 AND request_type_category = 'SW' THEN jtr.id END) AS escalated_level1_sw,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 2 AND request_type_category = 'SW' THEN jtr.id END) AS escalated_level2_sw,
+                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 3 AND request_type_category = 'SW' THEN jtr.id END) AS escalated_level3_sw
+                    FROM jira_tickets_reporting jtr
+                    JOIN week_reporting wr ON wr.calendar_week = jtr.resolved_week
+                    WHERE jtr.resolved_week IS NOT NULL
+                      AND COALESCE(jtr.status, '') != 'Cancelled'
+                      AND jtr.summary_block IS NOT NULL
+                      {reporting_request_type_filter}
+                      {reporting_support_filter}
+                    GROUP BY wr.{period_col}
+                ),
                 median_fr AS (
                     SELECT period, AVG(first_response_time_minutes) AS median_first_reply
                     FROM (
@@ -1414,6 +1450,60 @@ class DatabaseStore:
                 COALESCE(closed.closed_sw, 0) AS closed_sw,
                 COALESCE(closed.closed_dis, 0) AS closed_dis,
                 COALESCE(closed.closed_hw, 0) AS closed_hw,
+                CASE WHEN resolution_report_stats.rr_solved_total IS NULL OR resolution_report_stats.rr_solved_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.solved_level1 / resolution_report_stats.rr_solved_total, 2)
+                END AS solved_in_level1,
+                CASE WHEN resolution_report_stats.rr_solved_total IS NULL OR resolution_report_stats.rr_solved_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.solved_level2 / resolution_report_stats.rr_solved_total, 2)
+                END AS solved_in_level2,
+                CASE WHEN resolution_report_stats.rr_solved_total IS NULL OR resolution_report_stats.rr_solved_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.solved_level3 / resolution_report_stats.rr_solved_total, 2)
+                END AS solved_in_level3,
+                CASE WHEN resolution_report_stats.rr_solved_hw_total IS NULL OR resolution_report_stats.rr_solved_hw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.solved_level1_hw / resolution_report_stats.rr_solved_hw_total, 2)
+                END AS solved_in_level1_hw,
+                CASE WHEN resolution_report_stats.rr_solved_hw_total IS NULL OR resolution_report_stats.rr_solved_hw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.solved_level2_hw / resolution_report_stats.rr_solved_hw_total, 2)
+                END AS solved_in_level2_hw,
+                CASE WHEN resolution_report_stats.rr_solved_hw_total IS NULL OR resolution_report_stats.rr_solved_hw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.solved_level3_hw / resolution_report_stats.rr_solved_hw_total, 2)
+                END AS solved_in_level3_hw,
+                CASE WHEN resolution_report_stats.rr_solved_sw_total IS NULL OR resolution_report_stats.rr_solved_sw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.solved_level1_sw / resolution_report_stats.rr_solved_sw_total, 2)
+                END AS solved_in_level1_sw,
+                CASE WHEN resolution_report_stats.rr_solved_sw_total IS NULL OR resolution_report_stats.rr_solved_sw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.solved_level2_sw / resolution_report_stats.rr_solved_sw_total, 2)
+                END AS solved_in_level2_sw,
+                CASE WHEN resolution_report_stats.rr_solved_sw_total IS NULL OR resolution_report_stats.rr_solved_sw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.solved_level3_sw / resolution_report_stats.rr_solved_sw_total, 2)
+                END AS solved_in_level3_sw,
+                CASE WHEN resolution_report_stats.rr_escalated_total IS NULL OR resolution_report_stats.rr_escalated_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level1 / resolution_report_stats.rr_escalated_total, 2)
+                END AS escalated_to_level1,
+                CASE WHEN resolution_report_stats.rr_escalated_total IS NULL OR resolution_report_stats.rr_escalated_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level2 / resolution_report_stats.rr_escalated_total, 2)
+                END AS escalated_to_level2,
+                CASE WHEN resolution_report_stats.rr_escalated_total IS NULL OR resolution_report_stats.rr_escalated_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level3 / resolution_report_stats.rr_escalated_total, 2)
+                END AS escalated_to_level3,
+                CASE WHEN resolution_report_stats.rr_escalated_hw_total IS NULL OR resolution_report_stats.rr_escalated_hw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level1_hw / resolution_report_stats.rr_escalated_hw_total, 2)
+                END AS escalated_to_level1_hw,
+                CASE WHEN resolution_report_stats.rr_escalated_hw_total IS NULL OR resolution_report_stats.rr_escalated_hw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level2_hw / resolution_report_stats.rr_escalated_hw_total, 2)
+                END AS escalated_to_level2_hw,
+                CASE WHEN resolution_report_stats.rr_escalated_hw_total IS NULL OR resolution_report_stats.rr_escalated_hw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level3_hw / resolution_report_stats.rr_escalated_hw_total, 2)
+                END AS escalated_to_level3_hw,
+                CASE WHEN resolution_report_stats.rr_escalated_sw_total IS NULL OR resolution_report_stats.rr_escalated_sw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level1_sw / resolution_report_stats.rr_escalated_sw_total, 2)
+                END AS escalated_to_level1_sw,
+                CASE WHEN resolution_report_stats.rr_escalated_sw_total IS NULL OR resolution_report_stats.rr_escalated_sw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level2_sw / resolution_report_stats.rr_escalated_sw_total, 2)
+                END AS escalated_to_level2_sw,
+                CASE WHEN resolution_report_stats.rr_escalated_sw_total IS NULL OR resolution_report_stats.rr_escalated_sw_total = 0 THEN NULL
+                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level3_sw / resolution_report_stats.rr_escalated_sw_total, 2)
+                END AS escalated_to_level3_sw,
                 COALESCE(friday.aged_30, 0) AS aged_30_plus,
                 COALESCE(friday.aged_5, 0) AS aged_5_plus,
                 COALESCE(friday.overall_open, 0) AS overall_open,
@@ -1426,6 +1516,7 @@ class DatabaseStore:
             LEFT JOIN escalated ON escalated.period = wr.{period_col}
             LEFT JOIN newt ON newt.period = wr.{period_col}
             LEFT JOIN closed ON closed.period = wr.{period_col}
+            LEFT JOIN resolution_report_stats ON resolution_report_stats.period = wr.{period_col}
             LEFT JOIN median_fr ON median_fr.period = wr.{period_col}
             GROUP BY wr.{period_col}
             ORDER BY wr.{period_col}
