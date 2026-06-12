@@ -78,9 +78,6 @@ DEFAULT_NON_SUPPORT_REQUEST_TYPES = [
     "Licensing and billing questions"
 ]
 
-# Maximum number of latest comments to inspect for the resolution summary block.
-MAX_RESOLUTION_COMMENTS = 10
-
 # Resolver alias lookup in priority order: (alias, real name, level)
 DEFAULT_RESOLVER_ALIASES: list[tuple[str, str, int]] = [
     ("Abdelrahman Khamis", "Abdelrahman Khamis", 1),
@@ -145,7 +142,7 @@ DEFAULT_RESOLVER_ALIASES: list[tuple[str, str, int]] = [
 # Regex to extract structured fields for resolution summaries
 # ------------------------------
 RESOLUTION_BLOCK_REGEX = re.compile(
-    r"Resolution Summary by Rovo:.*?"
+    r"(?:Resolution Summary by Rovo:.*?)?"
     r"Category:\s*(?P<category>.*?)(?=Summary:)"
     r"Summary:\s*(?P<summary>.*?)(?=Rationale:)"
     r"Rationale:\s*(?P<rationale>.*?)(?=Suggested new category:|Resolver:|Outcome:)",
@@ -478,17 +475,17 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     return result
 
 
-def extract_resolution_data(comment_body: str) -> dict[str, Any] | None:
-    """Extracts structured fields from a resolution summary block in a comment."""
-    block = RESOLUTION_BLOCK_REGEX.search(comment_body)
+def extract_resolution_data(body: str) -> dict[str, Any] | None:
+    """Extracts structured fields from a resolution summary block."""
+    block = RESOLUTION_BLOCK_REGEX.search(body)
     if not block:
         return None
 
     data = block.groupdict()
-    newcat_match = RESOLUTION_OPTIONAL_NEW_CATEGORY.search(comment_body)
+    newcat_match = RESOLUTION_OPTIONAL_NEW_CATEGORY.search(body)
     data["new_category"] = newcat_match.group("newcat").strip() if newcat_match else None
 
-    resolver_match = RESOLUTION_RESOLVER_REGEX.search(comment_body)
+    resolver_match = RESOLUTION_RESOLVER_REGEX.search(body)
     if resolver_match:
         resolvers = resolver_match.group("resolver_line").strip()
         resolver_list = [r.strip() for r in resolvers.split(",") if r.strip()]
@@ -500,7 +497,7 @@ def extract_resolution_data(comment_body: str) -> dict[str, Any] | None:
         data["primary_resolver"] = None
         data["resolve_helpers"] = []
 
-    outcome_match = RESOLUTION_OUTCOME_REGEX.search(comment_body)
+    outcome_match = RESOLUTION_OUTCOME_REGEX.search(body)
     data["outcome"] = outcome_match.group("outcome").strip() if outcome_match else None
 
     for key in ["category", "summary", "rationale"]:
@@ -2034,6 +2031,32 @@ class SupportStatsGetter:
             tickets = [tid for (tid,) in conn.execute(select(self.store.jira_tickets.c.id)).fetchall()]
         self.recalculate_tickets(tickets)
 
+    def backfill_resolution_reports(self, since: datetime.date) -> None:
+        """Fetch and populate resolution_reports for resolved tickets since `since` that have no category."""
+        since_str = datetime.datetime(since.year, since.month, since.day, tzinfo=datetime.UTC).isoformat()
+        with self.store.engine.connect() as conn:
+            rows = conn.execute(
+                text("""
+                    SELECT jt.id, jt.key
+                    FROM jira_tickets jt
+                    LEFT JOIN resolution_reports rr ON rr.ticket_id = jt.id
+                    WHERE jt.resolved >= :since
+                      AND (rr.ticket_id IS NULL OR rr.category IS NULL)
+                """),
+                {"since": since_str},
+            ).fetchall()
+
+        total = len(rows)
+        logging.info("Backfilling resolution reports for %d tickets resolved since %s", total, since)
+        for idx, (ticket_id, ticket_key) in enumerate(rows, 1):
+            logging.info("Backfilling %s (%d/%d)", ticket_key, idx, total)
+            issue = self.fetch_jira_issue(ticket_key)
+            if issue is None:
+                logging.warning("Could not fetch %s from Jira — skipping", ticket_key)
+                continue
+            self.process_resolution_report(issue)
+        logging.info("Backfill complete: processed %d tickets", total)
+
     @log_call
     def recalculate_tickets(self, ticket_ids: Iterable[str]) -> None:
         """Recalculate KPI and mapped fields for the given ticket ids."""
@@ -2105,7 +2128,7 @@ class SupportStatsGetter:
             }
             processed_issue = calculate_kpi_fields(issue, updated_comments, changelog)
             self.store_jira_tickets([processed_issue])
-            self.process_resolution_report(issue, updated_comments)
+            self.process_resolution_report(issue)
             calendar_rows = make_jira_ticket_calendar(
                 processed_issue,
                 updated_comments,
@@ -2229,6 +2252,25 @@ class SupportStatsGetter:
         return all_changes
 
     @log_call
+    def fetch_jira_issue(self, issue_key: str) -> dict[str, Any] | None:
+        """Fetch a single issue from Jira by key. Returns None if not found."""
+        url = f"{self.config.jira_base_url}/rest/api/3/issue/{issue_key}"
+        r = requests.get(
+            url,
+            auth=self._jira_auth(),
+            headers={"Accept": "application/json"},
+            params={"fields": "*all"},
+        )
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        issue = r.json()
+        fields = issue.get("fields", {})
+        issue["created"] = self._parse_ts(fields.get("created"))
+        issue["resolved"] = self._parse_ts(fields.get("resolutiondate"))
+        issue["updated"] = self._parse_ts(fields.get("updated"))
+        return issue
+
     def fetch_jira_tickets(self, jql: str = "", updated_since: datetime.datetime | None = None) -> list[dict[str, Any]]:
         """Fetch issues from Jira using the search API (handles pagination)."""
         if not self.config.jira_base_url:
@@ -2462,7 +2504,7 @@ class SupportStatsGetter:
             )
         self.store.insert_many(self.store.jira_changelog, records)
 
-    def _comment_body_to_text(self, comment: Mapping[str, Any]) -> str:
+    def _body_to_text(self, comment: Mapping[str, Any]) -> str:
         raw_body = comment.get("body")
         rendered = comment.get("renderedBody")
         body = ""
@@ -2484,27 +2526,16 @@ class SupportStatsGetter:
     def process_resolution_report(
         self,
         issue: Mapping[str, Any],
-        comments: Iterable[Mapping[str, Any]],
     ) -> None:
         fields = issue.get("fields", {}) if isinstance(issue, Mapping) else {}
-        def comment_sort_key(comment: Mapping[str, Any]) -> datetime.datetime:
-            created = comment.get("created")
-            if isinstance(created, datetime.datetime):
-                if created.tzinfo is None:
-                    return created.replace(tzinfo=datetime.UTC)
-                return created
-            return datetime.datetime.min.replace(tzinfo=datetime.UTC)
+        raw = self._field_value(fields, "resolution_summary")
+        body = ""
+        if isinstance(raw, dict):
+            body = self._adf_to_text(raw)
+        elif isinstance(raw, str):
+            body = raw
 
-        comments_sorted = sorted(comments, key=comment_sort_key)
-        recent_comments = comments_sorted[-MAX_RESOLUTION_COMMENTS:]
-        extracted = None
-
-        for comment in reversed(recent_comments):
-            body = self._comment_body_to_text(comment)
-            if "Resolution Summary by Rovo:" in body:
-                extracted = extract_resolution_data(body)
-                if extracted:
-                    break
+        extracted = extract_resolution_data(body) if body else None
 
         if not extracted:
             ticket_id = issue.get("id")
@@ -2645,6 +2676,11 @@ if __name__ == "__main__":
         help="Recalculate KPI fields for all stored tickets",
     )
     parser.add_argument(
+        "--backfill-resolution-from",
+        metavar="DATE",
+        help="Backfill resolution_reports for resolved tickets since DATE (YYYY-MM-DD) that are missing a category",
+    )
+    parser.add_argument(
         "--output-excel",
         nargs="?",
         const="SupportStats.xlsx",
@@ -2693,7 +2729,7 @@ if __name__ == "__main__":
                 getter.store_jira_comments(issue["id"], issue.get("key"), comments)
                 getter.store_jira_worklogs(issue["id"], worklogs)
                 getter.store_jira_changelog(issue["id"], changelog)
-                getter.process_resolution_report(issue, comments)
+                getter.process_resolution_report(issue)
 
                 calendar_rows = make_jira_ticket_calendar(
                     issue,
@@ -2729,6 +2765,15 @@ if __name__ == "__main__":
             logging.exception("Failed to fetch or store Jira data")
     else:
         logging.error("Jira configuration missing in config file.")
+
+    if args.backfill_resolution_from:
+        try:
+            from_date = datetime.date.fromisoformat(args.backfill_resolution_from)
+        except ValueError:
+            logging.error("--backfill-resolution-from requires a date in YYYY-MM-DD format")
+            raise SystemExit(1)
+        logging.info("Starting resolution report backfill from %s", from_date)
+        getter.backfill_resolution_reports(from_date)
 
     if output_excel:
         logging.info("Writing Excel workbook to %s", output_excel)

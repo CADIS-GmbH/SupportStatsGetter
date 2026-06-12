@@ -26,7 +26,6 @@ JQL_TEMPLATE = (
     'AND resolutiondate >= "{start}" AND resolutiondate < "{end}"'
 )
 
-MAX_COMMENTS = 3
 MAX_RESULTS_PER_PAGE = 100
 
 session: requests.Session | None = None
@@ -95,7 +94,7 @@ DEFAULT_RESOLVER_ALIASES: list[tuple[str, str, int]] = [
 # Regex to extract structured fields
 # ------------------------------
 BLOCK_REGEX = re.compile(
-    r"Resolution Summary by Rovo:.*?"
+    r"(?:Resolution Summary by Rovo:.*?)?"
     r"Category:\s*(?P<category>.*?)(?=Summary:)"
     r"Summary:\s*(?P<summary>.*?)(?=Rationale:)"
     r"Rationale:\s*(?P<rationale>.*?)(?=Suggested new category:|Resolver:|Outcome:)",
@@ -234,18 +233,18 @@ class ResolutionDatabase:
                 conn.execute(self.resolution_resolvers.insert(), resolver_rows)
 
 
-def extract_resolution_data(comment_body: str):
-    """Extracts structured fields from a comment body. Returns None if not present."""
-    block = BLOCK_REGEX.search(comment_body)
+def extract_resolution_data(body: str):
+    """Extracts structured fields from a resolution summary block. Returns None if not present."""
+    block = BLOCK_REGEX.search(body)
     if not block:
         return None
 
     data = block.groupdict()
 
-    newcat_match = OPTIONAL_NEW_CATEGORY.search(comment_body)
+    newcat_match = OPTIONAL_NEW_CATEGORY.search(body)
     data["new_category"] = newcat_match.group("newcat").strip() if newcat_match else None
 
-    resolver_match = RESOLVER_REGEX.search(comment_body)
+    resolver_match = RESOLVER_REGEX.search(body)
     if resolver_match:
         resolvers = resolver_match.group("resolver_line").strip()
         resolver_list = [r.strip() for r in resolvers.split(",") if r.strip()]
@@ -257,7 +256,7 @@ def extract_resolution_data(comment_body: str):
         data["primary_resolver"] = None
         data["resolve_helpers"] = []
 
-    outcome_match = OUTCOME_REGEX.search(comment_body)
+    outcome_match = OUTCOME_REGEX.search(body)
     data["outcome"] = outcome_match.group("outcome").strip() if outcome_match else None
 
     for key in ["category", "summary", "rationale"]:
@@ -311,16 +310,6 @@ def query_jira_issues(jql: str):
             break
 
     return issues
-
-
-def get_comments(issue_key):
-    url = f"{JIRA_BASE_URL}/rest/api/3/issue/{issue_key}/comment"
-    if session is None:
-        raise RuntimeError("Session not initialized")
-    r = request_with_retry("GET", url, params={"expand": "renderedBody"})
-    r.raise_for_status()
-    comments = r.json().get("comments", [])
-    return comments[-MAX_COMMENTS:]  # latest few comments
 
 
 def simple_value(val):
@@ -478,24 +467,13 @@ def main():
         key = issue["key"]
         fields = issue["fields"]
 
-        comments = get_comments(key)
-        extracted = None
-
-        for comment in comments:
-            raw_body = comment.get("body") or ""
-            rendered = comment.get("renderedBody")
-            body = ""
-            if isinstance(raw_body, dict):
-                body = adf_to_text(raw_body)
-            else:
-                body = str(raw_body)
-            if not body and rendered:
-                body = str(rendered)
-
-            if "Resolution Summary by Rovo:" in body:
-                extracted = extract_resolution_data(body)
-                if extracted:
-                    break
+        raw = fields.get("customfield_11486")
+        body = ""
+        if isinstance(raw, dict):
+            body = adf_to_text(raw)
+        elif isinstance(raw, str):
+            body = raw
+        extracted = extract_resolution_data(body) if body else None
 
         if not extracted:
             extracted = {
