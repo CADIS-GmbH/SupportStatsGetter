@@ -12,3 +12,4 @@ config_*.json
 SupportStats.xlsx
 .vscode
 /*.xlsx
+CLAUDE.md
