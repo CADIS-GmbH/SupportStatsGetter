@@ -79,6 +79,16 @@ of tickets this can take from minutes to hours. Progress is written to the
 console and to the log file. When it finishes, the Excel report is written to
 `output_excel`.
 
+To skip old history, pass a start date. Only tickets updated on or after that
+date are downloaded:
+
+```powershell
+.\.venv\Scripts\python.exe SupportStatsGetter.py -c config.json --start-date 2025-01-01
+```
+
+The start date only applies to a new, empty database. Later runs fetch the
+updates since the last run as usual, so the option can stay in a batch file.
+
 ## 5. Fill the lookup tables
 
 Some settings are stored in the database, which exists after the first run.

@@ -65,6 +65,8 @@ python SupportStatsGetter.py --config config.json --log-level DEBUG
 ```
 Fetched tickets will be stored in the SQLite database specified in the config file.
 Subsequent runs only request tickets updated after the newest record already stored.
+For a new database, `--start-date YYYY-MM-DD` limits the first download to
+tickets updated on or after that date; it is ignored once tickets are stored.
 Use `--recalculate-all` to recalculate the KPI fields for every stored ticket,
 for example after changing the configuration.
 

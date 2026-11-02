@@ -2373,6 +2373,26 @@ if __name__ == "__main__":
         default=None,
         help="Export all views to an Excel workbook. If filename is omitted, uses 'SupportStats.xlsx'.",
     )
+
+    def parse_start_date(value: str) -> datetime.datetime:
+        try:
+            return datetime.datetime.combine(
+                datetime.date.fromisoformat(value), datetime.time()
+            )
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"invalid date '{value}', expected YYYY-MM-DD"
+            )
+
+    parser.add_argument(
+        "--start-date",
+        type=parse_start_date,
+        metavar="YYYY-MM-DD",
+        help=(
+            "For a new database: only fetch tickets updated on or after this date. "
+            "Ignored once the database contains tickets."
+        ),
+    )
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -2392,6 +2412,18 @@ if __name__ == "__main__":
     if cfg.jira_base_url:
         try:
             since = getter.latest_update_timestamp()
+            if args.start_date and since is None:
+                since = args.start_date
+                logging.info(
+                    "New database: fetching tickets updated since %s",
+                    since.date().isoformat(),
+                )
+            elif args.start_date:
+                logging.warning(
+                    "--start-date ignored: database already contains tickets, "
+                    "fetching updates since %s",
+                    since,
+                )
             logging.info("Fetching Jira tickets")
             raw_issues = getter.fetch_jira_tickets(updated_since=since)
             logging.info("Retrieved %d tickets from Jira", len(raw_issues))
