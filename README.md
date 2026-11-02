@@ -22,6 +22,7 @@ For step-by-step setup instructions see [SETUP.md](SETUP.md).
     "request_type": "customfield_10010",
     "deployment_type": "customfield_10011",
     "organizations": "customfield_10002",
+    "request_participants": "customfield_10014",
     "satisfaction": "customfield_10012",
     "satisfaction_ts": "customfield_10013"
   },

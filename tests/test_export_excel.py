@@ -61,9 +61,11 @@ def test_reporting_weeks_view_exported(tmp_path):
     wb = load_workbook(output)
     assert "reporting_weeks" in wb.sheetnames
     ws = wb["reporting_weeks"]
-    assert ws["A2"].value == "2025.01"
-    assert ws["B2"].value == "2025.01"
-    assert ws["C2"].value == "2025.Q1"
+    # an empty database starts the lookup at the current year
+    year = datetime.date.today().isocalendar().year
+    assert ws["A2"].value == f"{year}.01"
+    assert ws["B2"].value == f"{year}.01"
+    assert ws["C2"].value == f"{year}.Q1"
 
 
 def test_export_overwrite_with_backup(tmp_path):
