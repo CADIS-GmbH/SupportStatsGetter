@@ -13,3 +13,5 @@ SupportStats.xlsx
 .vscode
 /*.xlsx
 CLAUDE.md
+__pycache__/
+*.zip

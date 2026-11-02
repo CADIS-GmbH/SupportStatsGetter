@@ -77,8 +77,6 @@ def test_aged_counts_exclude_configured_request_types(tmp_path):
         "date": day,
         "comments": 0,
         "public_comments": 0,
-        "start_assigned_group": None,
-        "end_assigned_group": None,
         "start_assigned_user": None,
         "end_assigned_user": None,
         "start_assigned_user_email": None,

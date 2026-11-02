@@ -2,8 +2,7 @@
 ====================
 
 Tool for collecting ticket statistics from **Jira Service Management**.
-The data is stored in a normalized SQLite database. The code is based on
-``TeamSupportStatsGetter.py`` but no longer supports TeamSupport.
+The data is stored in a normalized SQLite database.
 """
 
 from __future__ import annotations
@@ -28,30 +27,20 @@ INTERNAL_EMAIL_PATTERNS: list[Pattern[str]] = []
 # from the ``org_lookup`` table at runtime.
 ORG_PATTERNS: list[tuple[Pattern[str], str, int]] = []
 
-# Mapping of priority names to numeric positions
-PRIORITY_POS_MAP = {
-    "C": -100,
-    "B": 0,
-    "A": 100,
-    "AA": 200,
-    "Offen": 0,
-    "Open": 0,
+# Default mapping of priority names to numeric positions. Positions above 0
+# count as high priority. Can be overridden with ``priority_positions`` in the
+# config file.
+DEFAULT_PRIORITY_POSITIONS = {
+    "Lowest": -200,
     "Low": -100,
-    "Normal": 0,
     "Medium": 0,
+    "Normal": 0,
     "High": 100,
+    "Highest": 200,
     "Critical": 200,
 }
-
-# Order of labels used to determine assigned group
-GROUP_PRIORITY = [
-    "1stLevel",
-    "2ndLevel",
-    "DIS-Lobster",
-    "hardware",
-    "product-team",
-    "operation",
-]
+# Mapping used at runtime, loaded from the config.
+PRIORITY_POS_MAP: dict[str, int] = DEFAULT_PRIORITY_POSITIONS.copy()
 
 # Statuses that do not count towards adjusted resolution time
 STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME = {
@@ -71,90 +60,24 @@ NO_CONTACT_IGNORE_STATUSES = {
     "PENDING",
 }
 
-DEFAULT_NON_SUPPORT_REQUEST_TYPES = [
-    "Maintenance & Service Operations",
-    "Product trial questions",
-    "Change request",
-    "Licensing and billing questions"
-]
+# Request types excluded from the support KPIs. Can be set with
+# ``non_support_request_types`` in the config file.
+DEFAULT_NON_SUPPORT_REQUEST_TYPES: list[str] = []
 
-# Resolver alias lookup in priority order: (alias, real name, level)
-DEFAULT_RESOLVER_ALIASES: list[tuple[str, str, int]] = [
-    ("Abdelrahman Khamis", "Abdelrahman Khamis", 1),
-    ("Abdelrahman.Khamis", "Abdelrahman Khamis", 1),
-    ("Ali Ahmed", "Ali Mohamed", 1),
-    ("Ali Mohamed", "Ali Mohamed", 1),
-    ("Ali.Mohamed", "Ali Mohamed", 1),
-    ("Anne Leske", "Anne Leske", 3),
-    ("Anne.Leske", "Anne Leske", 3),
-    ("Benedikt Wagner", "Benedikt Wagner", 2),
-    ("Benedikt.Wagner", "Benedikt Wagner", 2),
-    ("Erik von R\u30b0sten", "Erik von R\u30b0sten", 3),
-    ("Erik.vonR\u30b0sten", "Erik von R\u30b0sten", 3),
-    ("Inge Emmerichs", "Inge Emmerichs", 3),
-    ("Inge.Emmerichs", "Inge Emmerichs", 3),
-    ("Isabelle Lernbass", "Isabelle Lernbass", 3),
-    ("Isabelle.Lernbass", "Isabelle Lernbass", 3),
-    ("Johannes Arneth", "Johannes Arneth", 3),
-    ("Johannes.Arneth", "Johannes Arneth", 3),
-    ("Julian Beyer", "Julian Beyer", 2),
-    ("Julian.Beyer", "Julian Beyer", 2),
-    ("Mohamed Shebl", "Mohamed Shebl", 1),
-    ("Mohamed.Shebl", "Mohamed Shebl", 1),
-    ("Nermine Rashad", "Nermine Rashad", 1),
-    ("Nermine.Rashad", "Nermine Rashad", 1),
-    ("M\u30b0ller", "Ullrich M\u30b0ller", 3),
-    ("Ulli M\u30b0ller", "Ullrich M\u30b0ller", 3),
-    ("Ulli.M\u30b0ller", "Ullrich M\u30b0ller", 3),
-    ("Ullrich M\u30b0ller", "Ullrich M\u30b0ller", 3),
-    ("Ullrich.M\u30b0ller", "Ullrich M\u30b0ller", 3),
-    ("Winfried Gillich", "Winfried Gillich", 3),
-    ("Winfried.Gillich", "Winfried Gillich", 3),
-    ("Gillich", "Winfried Gillich", 3),
-    ("Franz Renger", "Franz Renger", 3),
-    ("Franz.Renger", "Franz Renger", 3),
-    ("Khalil Boukhdoud", "Khalil Boukhdoud", 3),
-    ("Khalil.Boukhdoud", "Khalil Boukhdoud", 3),
-    ("Stephan Schneider", "Stephan Schneider", 2),
-    ("Stephan.Schneider", "Stephan Schneider", 2),
-    ("Stefan Lieth", "Stefan Lieth", 3),
-    ("Stefan.Lieth", "Stefan Lieth", 3),
-    ("Hamud.AlHammoud", "Hamud Al Hammoud", 3),
-    ("Hamud Al Hammoud", "Hamud Al Hammoud", 3),
-    ("Al Hammoud, Hamud", "Hamud Al Hammoud", 3),
-    ("Andr\u30bc Hinz", "Andr\u30bc Hinz", 3),
-    ("Andre Hinz", "Andr\u30bc Hinz", 3),
-    ("Andr\u30bc.Hinz", "Andr\u30bc Hinz", 3),
-    ("Andre.Hinz", "Andr\u30bc Hinz", 3),
-    ("Cornelia Hagner", "Cornelia Hagner", 3),
-    ("Cornelia.Hagner", "Cornelia Hagner", 3),
-    ("Gillich, Winfried", "Winfried Gillich", 3),
-    ("M\u30b0ller, Ullrich", "Ullrich M\u30b0ller", 3),
-    ("Thomas.Wagner", "Thomas Wagner", 2),
-    ("Thomas Wagner", "Thomas Wagner", 2),
-    ("Armin Dobner", "Armin Dobner", 3),
-    ("Armin.Dobner", "Armin Dobner", 3),
-    ("Martin.G\u0411rick", "Martin G\u0411rick", 3),
-    ("Martin G\u0411rick", "Martin G\u0411rick", 3),
-]
+# Issue types counted in the support summary views. Can be set with
+# ``support_issue_types`` in the config file. An empty list counts all types.
+DEFAULT_SUPPORT_ISSUE_TYPES: list[str] = ["Support"]
 
-# ------------------------------
-# Regex to extract structured fields for resolution summaries
-# ------------------------------
-RESOLUTION_BLOCK_REGEX = re.compile(
-    r"(?:Resolution Summary by Rovo:.*?)?"
-    r"Category:\s*(?P<category>.*?)(?=Summary:)"
-    r"Summary:\s*(?P<summary>.*?)(?=Rationale:)"
-    r"Rationale:\s*(?P<rationale>.*?)(?=Suggested new category:|Resolver:|Outcome:)",
-    re.DOTALL,
-)
-RESOLUTION_OPTIONAL_NEW_CATEGORY = re.compile(
-    r"Suggested new category:\s*(?P<newcat>.*?)(?=Resolver:|Outcome:)", re.DOTALL
-)
-RESOLUTION_RESOLVER_REGEX = re.compile(
-    r"Resolver:\s*(?P<resolver_line>.*?)(?=Outcome:)", re.DOTALL
-)
-RESOLUTION_OUTCOME_REGEX = re.compile(r"Outcome:\s*(?P<outcome>.*)", re.DOTALL)
+# Request type categories used for the per-category columns in the summary
+# views: category -> SQL LIKE patterns matched against the request type. The
+# first matching category wins; unmatched tickets get the default category.
+# Can be set with ``request_type_categories`` and
+# ``request_type_category_default`` in the config file.
+DEFAULT_REQUEST_TYPE_CATEGORIES: dict[str, list[str]] = {"HW": ["%Hardware%"]}
+DEFAULT_REQUEST_TYPE_CATEGORY = "SW"
+
+# Years for which the week_reporting lookup table is populated.
+REPORTING_YEARS = (2025, 2026, 2027)
 
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
 JIRA_PULL_OVERLAP_MIN = 5 #60*24*7  #5
@@ -230,6 +153,18 @@ class Config:
         default_factory=lambda: DEFAULT_NON_SUPPORT_REQUEST_TYPES.copy()
     )
     priority_deescalation_ignore_minutes: int = 5
+    priority_positions: dict[str, int] = field(
+        default_factory=lambda: DEFAULT_PRIORITY_POSITIONS.copy()
+    )
+    support_issue_types: list[str] = field(
+        default_factory=lambda: DEFAULT_SUPPORT_ISSUE_TYPES.copy()
+    )
+    request_type_categories: dict[str, list[str]] = field(
+        default_factory=lambda: {
+            k: list(v) for k, v in DEFAULT_REQUEST_TYPE_CATEGORIES.items()
+        }
+    )
+    request_type_category_default: str | None = DEFAULT_REQUEST_TYPE_CATEGORY
 
     @staticmethod
     @log_call
@@ -256,6 +191,24 @@ class Config:
             priority_deescalation_ignore_minutes=data.get(
                 "priority_deescalation_ignore_minutes", 5
             ),
+            priority_positions={
+                str(k): int(v)
+                for k, v in data.get(
+                    "priority_positions", DEFAULT_PRIORITY_POSITIONS
+                ).items()
+            },
+            support_issue_types=list(
+                data.get("support_issue_types", DEFAULT_SUPPORT_ISSUE_TYPES)
+            ),
+            request_type_categories={
+                str(k): [str(p) for p in v]
+                for k, v in data.get(
+                    "request_type_categories", DEFAULT_REQUEST_TYPE_CATEGORIES
+                ).items()
+            },
+            request_type_category_default=data.get(
+                "request_type_category_default", DEFAULT_REQUEST_TYPE_CATEGORY
+            ),
         )
 
 
@@ -268,8 +221,6 @@ class JiraCalendarRecord:
     ticket_key: str
     comments: int = 0
     public_comments: int = 0
-    start_assigned_group: str = "1stLevel"
-    end_assigned_group: str = "1stLevel"
     start_assigned_user: str | None = None
     end_assigned_user: str | None = None
     start_assigned_user_email: str | None = None
@@ -360,14 +311,6 @@ def is_internal_user(author: Mapping[str, Any] | None) -> bool:
     if account_type:
         return True
     return False
-
-
-def group_from_labels(labels: list[str]) -> str:
-    """Return the first matching group label or ``1stLevel`` if none found."""
-    for grp in GROUP_PRIORITY:
-        if grp in labels:
-            return grp
-    return "1stLevel"
 
 
 def primary_org_from_names(names: list[str]) -> str | None:
@@ -475,66 +418,6 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     return result
 
 
-def extract_resolution_data(body: str) -> dict[str, Any] | None:
-    """Extracts structured fields from a resolution summary block."""
-    block = RESOLUTION_BLOCK_REGEX.search(body)
-    if not block:
-        return None
-
-    data = block.groupdict()
-    newcat_match = RESOLUTION_OPTIONAL_NEW_CATEGORY.search(body)
-    data["new_category"] = newcat_match.group("newcat").strip() if newcat_match else None
-
-    resolver_match = RESOLUTION_RESOLVER_REGEX.search(body)
-    if resolver_match:
-        resolvers = resolver_match.group("resolver_line").strip()
-        resolver_list = [r.strip() for r in resolvers.split(",") if r.strip()]
-        data["resolvers"] = resolver_list
-        data["primary_resolver"] = resolver_list[0] if resolver_list else None
-        data["resolve_helpers"] = resolver_list[1:] if len(resolver_list) > 1 else []
-    else:
-        data["resolvers"] = []
-        data["primary_resolver"] = None
-        data["resolve_helpers"] = []
-
-    outcome_match = RESOLUTION_OUTCOME_REGEX.search(body)
-    data["outcome"] = outcome_match.group("outcome").strip() if outcome_match else None
-
-    for key in ["category", "summary", "rationale"]:
-        if data.get(key):
-            data[key] = data[key].strip()
-
-    return data
-
-
-def map_resolvers_from_text(text: str, aliases: list[dict[str, Any]]) -> list[tuple[str, int]]:
-    """Map aliases found in text in order of appearance, using priority to break ties."""
-    lower = text.casefold()
-    hits: list[tuple[int, int, str, int]] = []
-    for alias in aliases:
-        alias_cf = str(alias["alias_cf"])
-        pos = lower.find(alias_cf)
-        if pos != -1:
-            hits.append(
-                (
-                    pos,
-                    int(alias["priority"]),
-                    str(alias["canonical_name"]),
-                    int(alias["level"]),
-                )
-            )
-    hits.sort(key=lambda x: (x[0], x[1]))
-
-    ordered: list[tuple[str, int]] = []
-    seen = set()
-    for _, _, real, level in hits:
-        if real not in seen:
-            ordered.append((real, level))
-            seen.add(real)
-
-    return ordered
-
-
 def make_jira_ticket_calendar(
     issue: dict[str, Any],
     comments: list[dict[str, Any]],
@@ -562,8 +445,6 @@ def make_jira_ticket_calendar(
         str,
         str | None,
         str | None,
-        list[str],
-        str,
         str,
         int,
         str | None,
@@ -574,7 +455,6 @@ def make_jira_ticket_calendar(
         status = (fields.get("status") or {}).get("name", "Open")
         user = (fields.get("assignee") or {}).get("displayName")
         user_email = (fields.get("assignee") or {}).get("emailAddress")
-        lbls: list[str] = list(fields.get("labels") or [])
         priority = (fields.get("priority") or {}).get("name") or ""
 
         prio_pos = PRIORITY_POS_MAP.get(priority, 0)
@@ -603,12 +483,6 @@ def make_jira_ticket_calendar(
                 elif field == "assignee":
                     user = str(prev_val)
                     user_email = None
-                elif field == "labels":
-                    if isinstance(prev_val, list):
-                        lbls = [str(l) for l in prev_val]
-                    else:
-                        lbls = [l.strip() for l in str(prev_val).split(",") if l.strip()]
-                    assigned_group = group_from_labels(lbls)
                 elif field == "priority":
                     priority = str(prev_val)
                     prio_pos = PRIORITY_POS_MAP.get(priority, 0)
@@ -621,8 +495,6 @@ def make_jira_ticket_calendar(
             status,
             user,
             user_email,
-            lbls,
-            group_from_labels(lbls),
             priority,
             prio_pos,
             req_type,
@@ -633,8 +505,6 @@ def make_jira_ticket_calendar(
         start_status,
         assigned_user,
         assigned_user_email,
-        labels,
-        assigned_group,
         priority_txt,
         priority_pos,
         request_type,
@@ -675,7 +545,6 @@ def make_jira_ticket_calendar(
         day_start_status = start_status
         day_start_user = assigned_user
         day_start_user_email = assigned_user_email
-        day_start_group = assigned_group
         day_start_priority_txt = priority_txt
         day_start_priority_pos = priority_pos
         day_start_request_type = request_type
@@ -721,9 +590,6 @@ def make_jira_ticket_calendar(
                                 if priority_pos > 0:    #only count if the ne prority is higher than 0 (A, AA)
                                     day_escalated_priority = True
                                 pending_escalation_ts = None
-                    elif field and field.lower() == "labels":
-                        labels = [l.strip() for l in (to_string or "").split(",") if l.strip()]
-                        assigned_group = group_from_labels(labels) or assigned_group
                     elif field and field.lower() in {req_field_lower, "request type"}:
                         request_type = to_string or request_type
                     elif field and field.lower() in {issuetype_field_lower, "issue type"}:
@@ -740,8 +606,6 @@ def make_jira_ticket_calendar(
             ticket_key=issue.get("key"),
             comments=day_actions,
             public_comments=day_public,
-            start_assigned_group=day_start_group or "1stLevel",
-            end_assigned_group=assigned_group or "1stLevel",
             start_assigned_user=day_start_user,
             end_assigned_user=assigned_user,
             start_assigned_user_email=day_start_user_email,
@@ -792,6 +656,9 @@ class DatabaseStore:
         self,
         engine: Engine | None = None,
         non_support_request_types: Iterable[str] | None = None,
+        support_issue_types: Iterable[str] | None = None,
+        request_type_categories: Mapping[str, Iterable[str]] | None = None,
+        request_type_category_default: str | None = DEFAULT_REQUEST_TYPE_CATEGORY,
     ):
         if engine is None:
             engine = create_engine("sqlite+pysqlite:///support_stats.sqlite")
@@ -803,6 +670,16 @@ class DatabaseStore:
             self.non_support_request_types = [
                 str(value) for value in non_support_request_types
             ]
+        if support_issue_types is None:
+            self.support_issue_types = DEFAULT_SUPPORT_ISSUE_TYPES.copy()
+        else:
+            self.support_issue_types = [str(value) for value in support_issue_types]
+        if request_type_categories is None:
+            request_type_categories = DEFAULT_REQUEST_TYPE_CATEGORIES
+        self.request_type_categories = {
+            str(k): [str(p) for p in v] for k, v in request_type_categories.items()
+        }
+        self.request_type_category_default = request_type_category_default
         self._prepare_schema()
 
     def _drop_view_if_exists(self, conn, view_name: str) -> None:
@@ -906,8 +783,6 @@ class DatabaseStore:
             Column("date", DateTime),
             Column("comments", Integer),
             Column("public_comments", Integer),
-            Column("start_assigned_group", String),
-            Column("end_assigned_group", String),
             Column("start_assigned_user", String),
             Column("end_assigned_user", String),
             Column("start_assigned_user_email", String),
@@ -936,40 +811,6 @@ class DatabaseStore:
             Column("weekday", Integer),
             Column("date_modified", DateTime),
         )
-        self.resolution_reports = Table(
-            "resolution_reports",
-            self.meta,
-            Column("ticket_id", String, ForeignKey("jira_tickets.id"), primary_key=True),
-            Column("issue_key", String),
-            Column("resolvers_raw", Text),
-            Column("primary_resolver", String),
-            Column("resolve_helpers", Text),
-            Column("escalated_to_level", Integer),
-            Column("solved_level", Integer),
-            Column("outcome", String),
-            Column("category", String),
-            Column("new_category", String),
-            Column("summary_block", Text),
-            Column("rationale", Text),
-            Column("updated_at", DateTime),
-        )
-        self.resolution_resolvers = Table(
-            "resolution_resolvers",
-            self.meta,
-            Column("id", Integer, primary_key=True),
-            Column("ticket_id", String, ForeignKey("resolution_reports.ticket_id")),
-            Column("resolver", String),
-            Column("resolver_index", Integer),
-            Column("resolver_level", Integer),
-        )
-        self.resolver_aliases = Table(
-            "resolver_aliases",
-            self.meta,
-            Column("alias", String, primary_key=True),
-            Column("canonical_name", String),
-            Column("level", Integer),
-            Column("priority", Integer),
-        )
         self.internal_users = Table(
             "internal_users",
             self.meta,
@@ -990,100 +831,102 @@ class DatabaseStore:
             Column("reporting_quarter", String),
         )
         self.meta.create_all(self.engine)
-        self._seed_resolver_aliases()
-        self._drop_resolution_report_columns()
 
-        # populate week to reporting month/quarter lookup
-        with self.engine.begin() as conn:
-            count = conn.execute(select(func.count()).select_from(self.week_reporting)).scalar()
-            if count == 0:
-                rows = []
-                for week in range(1, 53):
-                    if week <= 5:
-                        month = 1
-                    elif week <= 9:
-                        month = 2
-                    elif week <= 13:
-                        month = 3
-                    elif week <= 17:
-                        month = 4
-                    elif week <= 22:
-                        month = 5
-                    elif week <= 26:
-                        month = 6
-                    elif week <= 31:
-                        month = 7
-                    elif week <= 35:
-                        month = 8
-                    elif week <= 39:
-                        month = 9
-                    elif week <= 44:
-                        month = 10
-                    elif week <= 48:
-                        month = 11
-                    else:
-                        month = 12
-                    quarter = (month - 1) // 3 + 1
-                    rows.append(
-                        {
-                            "calendar_week": f"2025.{week:02}",
-                            "reporting_month": f"2025.{month:02}",
-                            "reporting_quarter": f"2025.Q{quarter}",
-                        }
-                    )
-                conn.execute(self.week_reporting.insert(), rows)
-
-    def _seed_resolver_aliases(self) -> None:
-        """Populate resolver_aliases table with default values when empty."""
-        with self.engine.begin() as conn:
-            count = conn.execute(
-                select(func.count()).select_from(self.resolver_aliases)
-            ).scalar()
-            if count:
-                return
-            rows = []
-            for priority, (alias, real, level) in enumerate(DEFAULT_RESOLVER_ALIASES):
+        # populate week to reporting month/quarter lookup; existing rows are kept
+        rows = []
+        for year in REPORTING_YEARS:
+            weeks_in_year = datetime.date(year, 12, 28).isocalendar().week
+            for week in range(1, weeks_in_year + 1):
+                if week <= 5:
+                    month = 1
+                elif week <= 9:
+                    month = 2
+                elif week <= 13:
+                    month = 3
+                elif week <= 17:
+                    month = 4
+                elif week <= 22:
+                    month = 5
+                elif week <= 26:
+                    month = 6
+                elif week <= 31:
+                    month = 7
+                elif week <= 35:
+                    month = 8
+                elif week <= 39:
+                    month = 9
+                elif week <= 44:
+                    month = 10
+                elif week <= 48:
+                    month = 11
+                else:
+                    month = 12
+                quarter = (month - 1) // 3 + 1
                 rows.append(
                     {
-                        "alias": alias,
-                        "canonical_name": real,
-                        "level": level,
-                        "priority": priority,
+                        "calendar_week": f"{year}.{week:02}",
+                        "reporting_month": f"{year}.{month:02}",
+                        "reporting_quarter": f"{year}.Q{quarter}",
                     }
                 )
-            conn.execute(self.resolver_aliases.insert(), rows)
+        with self.engine.begin() as conn:
+            conn.execute(self.week_reporting.insert().prefix_with("OR IGNORE"), rows)
 
-    def _drop_resolution_report_columns(self) -> None:
-        """Drop legacy columns that duplicate jira_tickets fields."""
-        inspector = sa_inspect(self.engine)
-        if "resolution_reports" not in inspector.get_table_names():
-            return
-        cols = [c["name"] for c in inspector.get_columns("resolution_reports")]
-        to_drop = {
-            "summary",
-            "status",
-            "issuetype",
-            "priority",
-            "request_type",
-            "organizations",
-            "work_category",
-        }
-        for col in sorted(to_drop):
-            if col in cols:
-                with self.engine.begin() as conn:
-                    try:
-                        conn.execute(text(f"ALTER TABLE resolution_reports DROP COLUMN {col}"))
-                    except Exception:
-                        logging.getLogger(__name__).warning(
-                            "Failed to drop column %s from resolution_reports", col
-                        )
+        self._create_views()
 
+    def _create_views(self) -> None:
+        """Create the reporting views and add columns missing in older databases."""
         with self.engine.begin() as conn:
             self._drop_view_if_exists(conn, "reporting_weeks")
             conn.execute(text("CREATE VIEW reporting_weeks AS SELECT * FROM week_reporting"))
 
         is_junk_expr = "CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END"
-        request_type_expr = "CASE WHEN jt.request_type LIKE '%Hardware%' THEN 'HW' ELSE 'SW' END"
+        def sql_str(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        when_clauses = [
+            f"WHEN jt.request_type LIKE {sql_str(pattern)} THEN {sql_str(category)}"
+            for category, patterns in self.request_type_categories.items()
+            for pattern in patterns
+        ]
+        default_category = (
+            sql_str(self.request_type_category_default)
+            if self.request_type_category_default
+            else "NULL"
+        )
+        if when_clauses:
+            request_type_expr = (
+                "CASE " + " ".join(when_clauses) + f" ELSE {default_category} END"
+            )
+        else:
+            request_type_expr = default_category
+
+        # one open_<category> / closed_<category> column per category
+        categories = list(self.request_type_categories)
+        if (
+            self.request_type_category_default
+            and self.request_type_category_default not in categories
+        ):
+            categories.append(self.request_type_category_default)
+        category_cols = [
+            (sql_str(category), re.sub(r"\W+", "_", category.lower()).strip("_"))
+            for category in categories
+        ]
+        active_category_cols = "".join(
+            f",\n                        COUNT(DISTINCT CASE WHEN request_type_category = {value} THEN id END) AS open_{suffix}"
+            for value, suffix in category_cols
+        )
+        closed_category_cols = "".join(
+            f"                        COUNT(DISTINCT CASE WHEN request_type_category = {value} THEN id END) AS closed_{suffix},\n"
+            for value, suffix in category_cols
+        )
+        summary_category_cols = "".join(
+            f"                COALESCE(active.open_{suffix}, 0) AS open_{suffix},\n"
+            for _, suffix in category_cols
+        ) + "".join(
+            f"                COALESCE(closed.closed_{suffix}, 0) AS closed_{suffix},\n"
+            for _, suffix in category_cols
+        )
         if self.non_support_request_types:
             excluded_values = ", ".join(
                 "'" + value.replace("'", "''") + "'"
@@ -1122,27 +965,36 @@ class DatabaseStore:
             reporting_request_type_filter = ""
             active_request_type_filter = ""
 
-        calendar_support_filter = (
-            " AND LOWER(COALESCE(jt.issuetype, jc.end_issuetype, jc.start_issuetype, '')) = 'support'"
-        )
-        tickets_support_filter = " AND LOWER(COALESCE(jt.issuetype, '')) = 'support'"
-        reporting_support_filter = " AND LOWER(COALESCE(jtr.issuetype, '')) = 'support'"
-        active_support_filter = " AND LOWER(COALESCE(jtaw.issuetype, '')) = 'support'"
+        if self.support_issue_types:
+            issue_type_values = ", ".join(
+                "'" + value.lower().replace("'", "''") + "'"
+                for value in self.support_issue_types
+            )
+            calendar_support_filter = (
+                " AND LOWER(COALESCE(jt.issuetype, jc.end_issuetype, jc.start_issuetype, '')) IN ("
+                + issue_type_values
+                + ")"
+            )
+            tickets_support_filter = (
+                " AND LOWER(COALESCE(jt.issuetype, '')) IN (" + issue_type_values + ")"
+            )
+            reporting_support_filter = (
+                " AND LOWER(COALESCE(jtr.issuetype, '')) IN (" + issue_type_values + ")"
+            )
+            active_support_filter = (
+                " AND LOWER(COALESCE(jtaw.issuetype, '')) IN (" + issue_type_values + ")"
+            )
+        else:
+            calendar_support_filter = ""
+            tickets_support_filter = ""
+            reporting_support_filter = ""
+            active_support_filter = ""
 
         # create a view exposing reporting month and quarter columns
         view_sql = f"""
             CREATE VIEW jira_tickets_reporting AS
             SELECT
                 jt.*,
-                rr.primary_resolver,
-                rr.resolve_helpers,
-                rr.escalated_to_level,
-                rr.solved_level,
-                rr.outcome,
-                rr.category,
-                rr.new_category,
-                rr.summary_block,
-                rr.rationale,
                 {is_junk_expr} AS is_junk,
                 {request_type_expr} AS request_type_category,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingmonth,
@@ -1156,7 +1008,6 @@ class DatabaseStore:
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.last_response_date_week) AS last_response_date_reportingmonth,
                 (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.last_response_date_week) AS last_response_date_reportingquarter
             FROM jira_tickets jt
-            LEFT JOIN resolution_reports rr ON rr.ticket_id = jt.id
         """
         with self.engine.begin() as conn:
             self._drop_view_if_exists(conn, "jira_tickets_reporting")
@@ -1187,8 +1038,6 @@ class DatabaseStore:
                 jc.date,
                 jc.comments,
                 jc.public_comments,
-                jc.start_assigned_group,
-                jc.end_assigned_group,
                 jc.start_assigned_user,
                 jc.end_assigned_user,
                 jc.start_assigned_user_email,
@@ -1265,10 +1114,7 @@ class DatabaseStore:
                 active AS (
                     SELECT
                         wr.{period_col} AS period,
-                        COUNT(DISTINCT id) AS ongoing,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'SW' THEN id END) AS open_sw,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS open_dis,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS open_hw
+                        COUNT(DISTINCT id) AS ongoing{active_category_cols}
                     FROM jira_tickets_active_weeks jtaw
                     JOIN week_reporting wr ON wr.calendar_week = active_week
                     WHERE COALESCE(status, '') != 'Cancelled'
@@ -1348,10 +1194,7 @@ class DatabaseStore:
                     SELECT
                         wr.{period_col} AS period,
                         COUNT(*) AS closed_tickets,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'SW' THEN id END) AS closed_sw,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS closed_dis,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS closed_hw,
-                        AVG(resolution_time_days) AS avg_resolution_days,
+{closed_category_cols}                        AVG(resolution_time_days) AS avg_resolution_days,
                         AVG(CAST(satisfaction AS REAL)) AS csat_score,
                         COUNT(satisfaction) AS csat_answers,
                         COUNT(CASE WHEN satisfaction = '1' THEN 1 END) AS csat_1,
@@ -1363,42 +1206,6 @@ class DatabaseStore:
                     JOIN week_reporting wr ON wr.calendar_week = jtr.resolved_week
                     WHERE jtr.resolved_week IS NOT NULL
                       AND COALESCE(jtr.status, '') != 'Cancelled'
-                      {reporting_request_type_filter}
-                      {reporting_support_filter}
-                    GROUP BY wr.{period_col}
-                ),
-                resolution_report_stats AS (
-                    SELECT
-                        wr.{period_col} AS period,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level IN (1, 2, 3) THEN jtr.id END) AS rr_solved_total,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level IN (1, 2, 3) AND request_type_category = 'HW' THEN jtr.id END) AS rr_solved_hw_total,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level IN (1, 2, 3) AND request_type_category = 'SW' THEN jtr.id END) AS rr_solved_sw_total,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level IN (1, 2, 3) THEN jtr.id END) AS rr_escalated_total,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level IN (1, 2, 3) AND request_type_category = 'HW' THEN jtr.id END) AS rr_escalated_hw_total,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level IN (1, 2, 3) AND request_type_category = 'SW' THEN jtr.id END) AS rr_escalated_sw_total,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 1 THEN jtr.id END) AS solved_level1,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 2 THEN jtr.id END) AS solved_level2,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 3 THEN jtr.id END) AS solved_level3,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 1 AND request_type_category = 'HW' THEN jtr.id END) AS solved_level1_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 2 AND request_type_category = 'HW' THEN jtr.id END) AS solved_level2_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 3 AND request_type_category = 'HW' THEN jtr.id END) AS solved_level3_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 1 AND request_type_category = 'SW' THEN jtr.id END) AS solved_level1_sw,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 2 AND request_type_category = 'SW' THEN jtr.id END) AS solved_level2_sw,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 3 AND request_type_category = 'SW' THEN jtr.id END) AS solved_level3_sw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 1 THEN jtr.id END) AS escalated_level1,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 2 THEN jtr.id END) AS escalated_level2,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 3 THEN jtr.id END) AS escalated_level3,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 1 AND request_type_category = 'HW' THEN jtr.id END) AS escalated_level1_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 2 AND request_type_category = 'HW' THEN jtr.id END) AS escalated_level2_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 3 AND request_type_category = 'HW' THEN jtr.id END) AS escalated_level3_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 1 AND request_type_category = 'SW' THEN jtr.id END) AS escalated_level1_sw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 2 AND request_type_category = 'SW' THEN jtr.id END) AS escalated_level2_sw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 3 AND request_type_category = 'SW' THEN jtr.id END) AS escalated_level3_sw
-                    FROM jira_tickets_reporting jtr
-                    JOIN week_reporting wr ON wr.calendar_week = jtr.resolved_week
-                    WHERE jtr.resolved_week IS NOT NULL
-                      AND COALESCE(jtr.status, '') != 'Cancelled'
-                      AND jtr.summary_block IS NOT NULL
                       {reporting_request_type_filter}
                       {reporting_support_filter}
                     GROUP BY wr.{period_col}
@@ -1441,67 +1248,7 @@ class DatabaseStore:
                 COALESCE(closed.csat_3, 0) AS csat_3,
                 COALESCE(closed.csat_4, 0) AS csat_4,
                 COALESCE(closed.csat_5, 0) AS csat_5,
-                COALESCE(active.open_sw, 0) AS open_sw,
-                COALESCE(active.open_dis, 0) AS open_dis,
-                COALESCE(active.open_hw, 0) AS open_hw,
-                COALESCE(closed.closed_sw, 0) AS closed_sw,
-                COALESCE(closed.closed_dis, 0) AS closed_dis,
-                COALESCE(closed.closed_hw, 0) AS closed_hw,
-                CASE WHEN resolution_report_stats.rr_solved_total IS NULL OR resolution_report_stats.rr_solved_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level1 / resolution_report_stats.rr_solved_total, 2)
-                END AS solved_in_level1,
-                CASE WHEN resolution_report_stats.rr_solved_total IS NULL OR resolution_report_stats.rr_solved_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level2 / resolution_report_stats.rr_solved_total, 2)
-                END AS solved_in_level2,
-                CASE WHEN resolution_report_stats.rr_solved_total IS NULL OR resolution_report_stats.rr_solved_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level3 / resolution_report_stats.rr_solved_total, 2)
-                END AS solved_in_level3,
-                CASE WHEN resolution_report_stats.rr_solved_hw_total IS NULL OR resolution_report_stats.rr_solved_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level1_hw / resolution_report_stats.rr_solved_hw_total, 2)
-                END AS solved_in_level1_hw,
-                CASE WHEN resolution_report_stats.rr_solved_hw_total IS NULL OR resolution_report_stats.rr_solved_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level2_hw / resolution_report_stats.rr_solved_hw_total, 2)
-                END AS solved_in_level2_hw,
-                CASE WHEN resolution_report_stats.rr_solved_hw_total IS NULL OR resolution_report_stats.rr_solved_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level3_hw / resolution_report_stats.rr_solved_hw_total, 2)
-                END AS solved_in_level3_hw,
-                CASE WHEN resolution_report_stats.rr_solved_sw_total IS NULL OR resolution_report_stats.rr_solved_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level1_sw / resolution_report_stats.rr_solved_sw_total, 2)
-                END AS solved_in_level1_sw,
-                CASE WHEN resolution_report_stats.rr_solved_sw_total IS NULL OR resolution_report_stats.rr_solved_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level2_sw / resolution_report_stats.rr_solved_sw_total, 2)
-                END AS solved_in_level2_sw,
-                CASE WHEN resolution_report_stats.rr_solved_sw_total IS NULL OR resolution_report_stats.rr_solved_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level3_sw / resolution_report_stats.rr_solved_sw_total, 2)
-                END AS solved_in_level3_sw,
-                CASE WHEN resolution_report_stats.rr_escalated_total IS NULL OR resolution_report_stats.rr_escalated_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level1 / resolution_report_stats.rr_escalated_total, 2)
-                END AS escalated_to_level1,
-                CASE WHEN resolution_report_stats.rr_escalated_total IS NULL OR resolution_report_stats.rr_escalated_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level2 / resolution_report_stats.rr_escalated_total, 2)
-                END AS escalated_to_level2,
-                CASE WHEN resolution_report_stats.rr_escalated_total IS NULL OR resolution_report_stats.rr_escalated_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level3 / resolution_report_stats.rr_escalated_total, 2)
-                END AS escalated_to_level3,
-                CASE WHEN resolution_report_stats.rr_escalated_hw_total IS NULL OR resolution_report_stats.rr_escalated_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level1_hw / resolution_report_stats.rr_escalated_hw_total, 2)
-                END AS escalated_to_level1_hw,
-                CASE WHEN resolution_report_stats.rr_escalated_hw_total IS NULL OR resolution_report_stats.rr_escalated_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level2_hw / resolution_report_stats.rr_escalated_hw_total, 2)
-                END AS escalated_to_level2_hw,
-                CASE WHEN resolution_report_stats.rr_escalated_hw_total IS NULL OR resolution_report_stats.rr_escalated_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level3_hw / resolution_report_stats.rr_escalated_hw_total, 2)
-                END AS escalated_to_level3_hw,
-                CASE WHEN resolution_report_stats.rr_escalated_sw_total IS NULL OR resolution_report_stats.rr_escalated_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level1_sw / resolution_report_stats.rr_escalated_sw_total, 2)
-                END AS escalated_to_level1_sw,
-                CASE WHEN resolution_report_stats.rr_escalated_sw_total IS NULL OR resolution_report_stats.rr_escalated_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level2_sw / resolution_report_stats.rr_escalated_sw_total, 2)
-                END AS escalated_to_level2_sw,
-                CASE WHEN resolution_report_stats.rr_escalated_sw_total IS NULL OR resolution_report_stats.rr_escalated_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level3_sw / resolution_report_stats.rr_escalated_sw_total, 2)
-                END AS escalated_to_level3_sw,
-                COALESCE(friday.aged_30, 0) AS aged_30_plus,
+{summary_category_cols}                COALESCE(friday.aged_30, 0) AS aged_30_plus,
                 COALESCE(friday.aged_5, 0) AS aged_5_plus,
                 COALESCE(friday.overall_open, 0) AS overall_open,
                 COALESCE(friday.unassigned, 0) AS unassigned,
@@ -1513,7 +1260,6 @@ class DatabaseStore:
             LEFT JOIN escalated ON escalated.period = wr.{period_col}
             LEFT JOIN newt ON newt.period = wr.{period_col}
             LEFT JOIN closed ON closed.period = wr.{period_col}
-            LEFT JOIN resolution_report_stats ON resolution_report_stats.period = wr.{period_col}
             LEFT JOIN median_fr ON median_fr.period = wr.{period_col}
             GROUP BY wr.{period_col}
             ORDER BY wr.{period_col}
@@ -1553,6 +1299,9 @@ class DatabaseStore:
                 reporting_support_filter=reporting_support_filter,
                 active_request_type_filter=active_request_type_filter,
                 active_support_filter=active_support_filter,
+                active_category_cols=active_category_cols,
+                closed_category_cols=closed_category_cols,
+                summary_category_cols=summary_category_cols,
             )
 
         weekly_report_view_sql = build_summary_view_sql(
@@ -1780,51 +1529,6 @@ class DatabaseStore:
         return compiled
 
     @log_call
-    def load_resolver_aliases(self) -> list[dict[str, Any]]:
-        inspector = sa_inspect(self.engine)
-        if "resolver_aliases" not in inspector.get_table_names():
-            return []
-        with self.engine.connect() as conn:
-            rows = conn.execute(
-                select(
-                    self.resolver_aliases.c.alias,
-                    self.resolver_aliases.c.canonical_name,
-                    self.resolver_aliases.c.level,
-                    self.resolver_aliases.c.priority,
-                ).order_by(self.resolver_aliases.c.priority)
-            ).fetchall()
-        return [
-            {
-                "alias": row.alias,
-                "alias_cf": row.alias.casefold().strip(),
-                "canonical_name": row.canonical_name,
-                "level": row.level,
-                "priority": row.priority,
-            }
-            for row in rows
-        ]
-
-    @log_call
-    def upsert_resolution_report(
-        self,
-        report_row: dict[str, Any],
-        resolver_rows: Iterable[dict[str, Any]],
-    ) -> None:
-        with self.engine.begin() as conn:
-            conn.execute(
-                self.resolution_reports.insert().prefix_with("OR REPLACE"),
-                [report_row],
-            )
-            conn.execute(
-                delete(self.resolution_resolvers).where(
-                    self.resolution_resolvers.c.ticket_id == report_row["ticket_id"]
-                )
-            )
-            resolver_rows = list(resolver_rows)
-            if resolver_rows:
-                conn.execute(self.resolution_resolvers.insert(), resolver_rows)
-
-    @log_call
     def get_ticket_with_related(self, ticket_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         """Load a ticket and related records from the database."""
         with self.engine.connect() as conn:
@@ -1900,13 +1604,18 @@ class SupportStatsGetter:
         self.config = config
         engine = create_engine(f"sqlite+pysqlite:///{config.db_path}")
         self.store = DatabaseStore(
-            engine, non_support_request_types=config.non_support_request_types
+            engine,
+            non_support_request_types=config.non_support_request_types,
+            support_issue_types=config.support_issue_types,
+            request_type_categories=config.request_type_categories,
+            request_type_category_default=config.request_type_category_default,
         )
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
         global ORG_PATTERNS
         ORG_PATTERNS = self.store.load_org_patterns()
-        self.resolver_aliases = self.store.load_resolver_aliases()
+        global PRIORITY_POS_MAP
+        PRIORITY_POS_MAP = dict(config.priority_positions)
 
     def _field_value(
         self,
@@ -2031,32 +1740,6 @@ class SupportStatsGetter:
             tickets = [tid for (tid,) in conn.execute(select(self.store.jira_tickets.c.id)).fetchall()]
         self.recalculate_tickets(tickets)
 
-    def backfill_resolution_reports(self, since: datetime.date) -> None:
-        """Fetch and populate resolution_reports for resolved tickets since `since` that have no category."""
-        since_str = datetime.datetime(since.year, since.month, since.day, tzinfo=datetime.UTC).isoformat()
-        with self.store.engine.connect() as conn:
-            rows = conn.execute(
-                text("""
-                    SELECT jt.id, jt.key
-                    FROM jira_tickets jt
-                    LEFT JOIN resolution_reports rr ON rr.ticket_id = jt.id
-                    WHERE jt.resolved >= :since
-                      AND (rr.ticket_id IS NULL OR rr.category IS NULL)
-                """),
-                {"since": since_str},
-            ).fetchall()
-
-        total = len(rows)
-        logging.info("Backfilling resolution reports for %d tickets resolved since %s", total, since)
-        for idx, (ticket_id, ticket_key) in enumerate(rows, 1):
-            logging.info("Backfilling %s (%d/%d)", ticket_key, idx, total)
-            issue = self.fetch_jira_issue(ticket_key)
-            if issue is None:
-                logging.warning("Could not fetch %s from Jira — skipping", ticket_key)
-                continue
-            self.process_resolution_report(issue)
-        logging.info("Backfill complete: processed %d tickets", total)
-
     @log_call
     def recalculate_tickets(self, ticket_ids: Iterable[str]) -> None:
         """Recalculate KPI and mapped fields for the given ticket ids."""
@@ -2128,7 +1811,6 @@ class SupportStatsGetter:
             }
             processed_issue = calculate_kpi_fields(issue, updated_comments, changelog)
             self.store_jira_tickets([processed_issue])
-            self.process_resolution_report(issue)
             calendar_rows = make_jira_ticket_calendar(
                 processed_issue,
                 updated_comments,
@@ -2250,26 +1932,6 @@ class SupportStatsGetter:
             start_at += len(histories)
 
         return all_changes
-
-    @log_call
-    def fetch_jira_issue(self, issue_key: str) -> dict[str, Any] | None:
-        """Fetch a single issue from Jira by key. Returns None if not found."""
-        url = f"{self.config.jira_base_url}/rest/api/3/issue/{issue_key}"
-        r = requests.get(
-            url,
-            auth=self._jira_auth(),
-            headers={"Accept": "application/json"},
-            params={"fields": "*all"},
-        )
-        if r.status_code == 404:
-            return None
-        r.raise_for_status()
-        issue = r.json()
-        fields = issue.get("fields", {})
-        issue["created"] = self._parse_ts(fields.get("created"))
-        issue["resolved"] = self._parse_ts(fields.get("resolutiondate"))
-        issue["updated"] = self._parse_ts(fields.get("updated"))
-        return issue
 
     def fetch_jira_tickets(self, jql: str = "", updated_since: datetime.datetime | None = None) -> list[dict[str, Any]]:
         """Fetch issues from Jira using the search API (handles pagination)."""
@@ -2504,111 +2166,6 @@ class SupportStatsGetter:
             )
         self.store.insert_many(self.store.jira_changelog, records)
 
-    def _body_to_text(self, comment: Mapping[str, Any]) -> str:
-        raw_body = comment.get("body")
-        rendered = comment.get("renderedBody")
-        body = ""
-        if isinstance(raw_body, dict):
-            body = self._adf_to_text(raw_body)
-        elif isinstance(raw_body, str):
-            body = raw_body
-            if raw_body.lstrip().startswith("{"):
-                try:
-                    parsed = json.loads(raw_body)
-                except json.JSONDecodeError:
-                    parsed = None
-                if isinstance(parsed, dict):
-                    body = self._adf_to_text(parsed)
-        if not body and rendered:
-            body = str(rendered)
-        return body or ""
-
-    def process_resolution_report(
-        self,
-        issue: Mapping[str, Any],
-    ) -> None:
-        fields = issue.get("fields", {}) if isinstance(issue, Mapping) else {}
-        raw = self._field_value(fields, "resolution_summary")
-        body = ""
-        if isinstance(raw, dict):
-            body = self._adf_to_text(raw)
-        elif isinstance(raw, str):
-            body = raw
-
-        extracted = extract_resolution_data(body) if body else None
-
-        if not extracted:
-            ticket_id = issue.get("id")
-            if ticket_id:
-                with self.store.engine.begin() as conn:
-                    conn.execute(
-                        delete(self.store.resolution_resolvers).where(
-                            self.store.resolution_resolvers.c.ticket_id == ticket_id
-                        )
-                    )
-                    conn.execute(
-                        delete(self.store.resolution_reports).where(
-                            self.store.resolution_reports.c.ticket_id == ticket_id
-                        )
-                    )
-            return
-
-        extracted.setdefault("resolvers", extracted.get("resolvers", []))
-
-        resolvers_list = extracted.get("resolvers") or []
-        resolvers_raw = ", ".join(resolvers_list)
-        mapped_order: list[tuple[str, int]] = []
-        for name in resolvers_list:
-            mapped_order.extend(map_resolvers_from_text(name, self.resolver_aliases))
-
-        extracted_primary = mapped_order[0][0] if mapped_order else None
-        extracted_primary_level = mapped_order[0][1] if mapped_order else None
-        resolve_helpers_mapped = [n for n, _ in mapped_order[1:]] if len(mapped_order) > 1 else []
-        all_levels = [lvl for _, lvl in mapped_order]
-        escalated_level = max(all_levels) if all_levels else None
-
-        outcome_val = extracted.get("outcome")
-        if isinstance(outcome_val, str):
-            trimmed = outcome_val.strip()
-            lowered = trimmed.casefold()
-            if lowered.startswith("abandoned"):
-                outcome_val = "Abandoned"
-            elif lowered.startswith("solved"):
-                outcome_val = "Solved"
-            elif lowered.startswith("not solved"):
-                outcome_val = "Not Solved"
-            else:
-                outcome_val = trimmed
-
-        report_row = {
-            "ticket_id": issue.get("id"),
-            "issue_key": issue.get("key"),
-            "resolvers_raw": resolvers_raw,
-            "primary_resolver": extracted_primary,
-            "resolve_helpers": "; ".join(resolve_helpers_mapped) if resolve_helpers_mapped else None,
-            "escalated_to_level": escalated_level,
-            "solved_level": extracted_primary_level,
-            "outcome": outcome_val,
-            "category": extracted.get("category"),
-            "new_category": extracted.get("new_category"),
-            "summary_block": extracted.get("summary"),
-            "rationale": extracted.get("rationale"),
-            "updated_at": datetime.datetime.now(datetime.UTC),
-        }
-        if not report_row["ticket_id"]:
-            return
-
-        resolver_rows = [
-            {
-                "ticket_id": report_row["ticket_id"],
-                "resolver": resolver_name,
-                "resolver_index": idx + 1,
-                "resolver_level": level,
-            }
-            for idx, (resolver_name, level) in enumerate(mapped_order)
-        ]
-        self.store.upsert_resolution_report(report_row, resolver_rows)
-
     @staticmethod
     def _adf_to_text(node: Any) -> str:
         """Return plain text from an Atlassian Document Format structure."""
@@ -2676,11 +2233,6 @@ if __name__ == "__main__":
         help="Recalculate KPI fields for all stored tickets",
     )
     parser.add_argument(
-        "--backfill-resolution-from",
-        metavar="DATE",
-        help="Backfill resolution_reports for resolved tickets since DATE (YYYY-MM-DD) that are missing a category",
-    )
-    parser.add_argument(
         "--output-excel",
         nargs="?",
         const="SupportStats.xlsx",
@@ -2729,7 +2281,6 @@ if __name__ == "__main__":
                 getter.store_jira_comments(issue["id"], issue.get("key"), comments)
                 getter.store_jira_worklogs(issue["id"], worklogs)
                 getter.store_jira_changelog(issue["id"], changelog)
-                getter.process_resolution_report(issue)
 
                 calendar_rows = make_jira_ticket_calendar(
                     issue,
@@ -2765,15 +2316,6 @@ if __name__ == "__main__":
             logging.exception("Failed to fetch or store Jira data")
     else:
         logging.error("Jira configuration missing in config file.")
-
-    if args.backfill_resolution_from:
-        try:
-            from_date = datetime.date.fromisoformat(args.backfill_resolution_from)
-        except ValueError:
-            logging.error("--backfill-resolution-from requires a date in YYYY-MM-DD format")
-            raise SystemExit(1)
-        logging.info("Starting resolution report backfill from %s", from_date)
-        getter.backfill_resolution_reports(from_date)
 
     if output_excel:
         logging.info("Writing Excel workbook to %s", output_excel)
