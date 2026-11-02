@@ -53,6 +53,7 @@ with your own:
 | `support_issue_types` | Your support issue type name(s), e.g. `["Support"]` or `["Service Request", "Incident"]` |
 | `request_type_categories` / `request_type_category_default` | How request types are grouped in the reports, or `{}` / `null` for no grouping |
 | `priority_positions` | Your Jira priority names; positions above 0 count as high priority |
+| `closed_statuses`, `cancelled_statuses`, `resolution_time_excluded_statuses`, `no_contact_ignore_statuses` | Your workflow's status names (case doesn't matter); see the README for what each list does. Leave them out to use the defaults. |
 
 Notes:
 
@@ -92,8 +93,8 @@ rows to these tables:
   organization: `regex` is matched against the organization name,
   `primary_org` is the result, and the row with the highest `priority` wins.
 - **`week_reporting`** – assigns calendar weeks to reporting months and
-  quarters. 2025–2027 are filled in automatically; add rows for later years
-  when needed, otherwise those weeks are missing from the summary reports.
+  quarters. Weeks are filled in automatically from the oldest ticket to the
+  current year; you only need to edit rows to change the month assignment.
 
 Click *Write Changes*, close DB Browser, then recalculate all tickets so the
 new settings are applied:
@@ -138,6 +139,6 @@ The Excel workbook has one sheet per database view. The most important ones:
 | `400 Bad Request` on the search | `base_jql` is invalid; test it in Jira's issue search first. |
 | `FileNotFoundError` or `unable to open database file` | The folder in `log_file` or `db_path` does not exist. |
 | `Permission denied` on the Excel file | The workbook is open in Excel; close it. |
-| Summary views are all 0 | `support_issue_types` does not match your issue type names, or the weeks are missing in `week_reporting`. |
+| Summary views are all 0 | `support_issue_types` does not match your issue type names, or `cancelled_statuses` / `closed_statuses` don't match your workflow. |
 | No first response times | `internal_users` is empty or does not match your agents' email addresses (step 5). |
 | Request type, satisfaction, ... empty | Wrong or missing `custom_fields` IDs (step 3). |

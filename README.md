@@ -35,6 +35,16 @@ For step-by-step setup instructions see [SETUP.md](SETUP.md).
     "HW": ["%Hardware%"]
   },
   "request_type_category_default": "SW",
+  "closed_statuses": ["Resolved", "Closed", "Cancelled"],
+  "cancelled_statuses": ["Cancelled"],
+  "resolution_time_excluded_statuses": [
+    "Closed",
+    "Cancelled",
+    "Resolved",
+    "Waiting for customer",
+    "Pending"
+  ],
+  "no_contact_ignore_statuses": ["Closed", "Resolved", "Cancelled", "Pending"],
   "priority_deescalation_ignore_minutes": 5,
   "priority_positions": {
     "Lowest": -200,
@@ -73,6 +83,10 @@ for example after changing the configuration.
 | `request_type_categories` | Groups request types into categories for the summary views. Each category has a list of SQL `LIKE` patterns (`%` = any text, case-insensitive) matched against the request type; the first matching category wins. The summary views get an `open_<category>` and a `closed_<category>` column per category. Default: `{"HW": ["%Hardware%"]}`. |
 | `request_type_category_default` | Category for request types that match no pattern. Default: `SW`. Set to `null` together with an empty `request_type_categories` to drop the category columns. |
 | `priority_positions` | Maps Jira priority names to a numeric position. Positions above `0` count as high priority, and a raise to a position above `0` counts as an escalation. Unknown priorities get `0`. Defaults to the standard Jira priorities shown above. |
+| `closed_statuses` | Statuses in which a ticket counts as closed: sets the resolved date and stops the open-day count, and closed tickets are left out of the open ticket counts. Default: `["Resolved", "Closed", "Cancelled"]`. |
+| `cancelled_statuses` | Statuses that mark a ticket as cancelled (`is_junk`); these tickets are left out of the summary views. Default: `["Cancelled"]`. |
+| `resolution_time_excluded_statuses` | Days that start in one of these statuses do not count towards the adjusted resolution time. Default: `["Closed", "Cancelled", "Resolved", "Waiting for customer", "Pending"]`. |
+| `no_contact_ignore_statuses` | Tickets in these statuses are not counted in the "over 5 days no contact" KPI. Default: `["Closed", "Resolved", "Cancelled", "Pending"]`. |
 | `priority_deescalation_ignore_minutes` | A priority raise that is reverted within this many minutes is not counted as an escalation. |
 
 ### Lookup tables
@@ -81,7 +95,7 @@ Some settings live in database tables so they can be maintained without changing
 
 - `internal_users` (`pattern`) – regular expressions matched against author email addresses. Matching authors count as agents, which is used to calculate first and last response times.
 - `org_lookup` (`regex`, `primary_org`, `priority`) – maps Jira organization names to a primary organization. When several match, the highest priority wins.
-- `week_reporting` (`calendar_week`, `reporting_month`, `reporting_quarter`) – assigns ISO weeks (`YYYY.WW`) to reporting months and quarters. The summary views only show weeks listed here. The weeks of 2025–2027 are added automatically (weeks 1–5 → month 1, 6–9 → 2, 10–13 → 3, and so on); rows you edit are kept. Add rows for later years when needed.
+- `week_reporting` (`calendar_week`, `reporting_month`, `reporting_quarter`) – assigns ISO weeks (`YYYY.WW`) to reporting months and quarters. The summary views only show weeks listed here. Weeks are added automatically for every year from the oldest stored ticket to the current year (weeks 1–5 → month 1, 6–9 → 2, 10–13 → 3, and so on); rows you edit are kept.
 
 ## Excel export
 

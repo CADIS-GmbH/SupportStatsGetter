@@ -42,22 +42,41 @@ DEFAULT_PRIORITY_POSITIONS = {
 # Mapping used at runtime, loaded from the config.
 PRIORITY_POS_MAP: dict[str, int] = DEFAULT_PRIORITY_POSITIONS.copy()
 
-# Statuses that do not count towards adjusted resolution time
-STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME = {
-    "CLOSED",
-    "CANCELLED",
-    "RESOLVED",
-    "WAITING FOR CUSTOMER",
-    "PENDING",
-}
+# Status lists below are matched case-insensitively and can be set in the
+# config file under the key named in each comment.
 
-# Statuses that are treated as closed for the "over 5 days no contact" KPI
-NO_CONTACT_IGNORE_STATUSES = {
-    "CLOSED",
-    "RESOLVED",
-    "CANCELLED",
-    "CLOSED",
-    "PENDING",
+# Statuses in which a ticket counts as closed: resolved date, open days and
+# open ticket counts. Config: ``closed_statuses``.
+DEFAULT_CLOSED_STATUSES: list[str] = ["Resolved", "Closed", "Cancelled"]
+
+# Statuses that mark a ticket as cancelled (is_junk) and exclude it from the
+# summary KPIs. Config: ``cancelled_statuses``.
+DEFAULT_CANCELLED_STATUSES: list[str] = ["Cancelled"]
+
+# Statuses that do not count towards adjusted resolution time.
+# Config: ``resolution_time_excluded_statuses``.
+DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES: list[str] = [
+    "Closed",
+    "Cancelled",
+    "Resolved",
+    "Waiting for customer",
+    "Pending",
+]
+
+# Statuses that are treated as closed for the "over 5 days no contact" KPI.
+# Config: ``no_contact_ignore_statuses``.
+DEFAULT_NO_CONTACT_IGNORE_STATUSES: list[str] = [
+    "Closed",
+    "Resolved",
+    "Cancelled",
+    "Pending",
+]
+
+# Lower-cased status sets used at runtime, loaded from the config.
+CLOSED_STATUSES: set[str] = {s.lower() for s in DEFAULT_CLOSED_STATUSES}
+CANCELLED_STATUSES: set[str] = {s.lower() for s in DEFAULT_CANCELLED_STATUSES}
+RESOLUTION_TIME_EXCLUDED_STATUSES: set[str] = {
+    s.lower() for s in DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES
 }
 
 # Request types excluded from the support KPIs. Can be set with
@@ -75,9 +94,6 @@ DEFAULT_SUPPORT_ISSUE_TYPES: list[str] = ["Support"]
 # ``request_type_category_default`` in the config file.
 DEFAULT_REQUEST_TYPE_CATEGORIES: dict[str, list[str]] = {"HW": ["%Hardware%"]}
 DEFAULT_REQUEST_TYPE_CATEGORY = "SW"
-
-# Years for which the week_reporting lookup table is populated.
-REPORTING_YEARS = (2025, 2026, 2027)
 
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
 JIRA_PULL_OVERLAP_MIN = 5 #60*24*7  #5
@@ -165,6 +181,18 @@ class Config:
         }
     )
     request_type_category_default: str | None = DEFAULT_REQUEST_TYPE_CATEGORY
+    closed_statuses: list[str] = field(
+        default_factory=lambda: DEFAULT_CLOSED_STATUSES.copy()
+    )
+    cancelled_statuses: list[str] = field(
+        default_factory=lambda: DEFAULT_CANCELLED_STATUSES.copy()
+    )
+    resolution_time_excluded_statuses: list[str] = field(
+        default_factory=lambda: DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES.copy()
+    )
+    no_contact_ignore_statuses: list[str] = field(
+        default_factory=lambda: DEFAULT_NO_CONTACT_IGNORE_STATUSES.copy()
+    )
 
     @staticmethod
     @log_call
@@ -208,6 +236,23 @@ class Config:
             },
             request_type_category_default=data.get(
                 "request_type_category_default", DEFAULT_REQUEST_TYPE_CATEGORY
+            ),
+            closed_statuses=list(
+                data.get("closed_statuses", DEFAULT_CLOSED_STATUSES)
+            ),
+            cancelled_statuses=list(
+                data.get("cancelled_statuses", DEFAULT_CANCELLED_STATUSES)
+            ),
+            resolution_time_excluded_statuses=list(
+                data.get(
+                    "resolution_time_excluded_statuses",
+                    DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES,
+                )
+            ),
+            no_contact_ignore_statuses=list(
+                data.get(
+                    "no_contact_ignore_statuses", DEFAULT_NO_CONTACT_IGNORE_STATUSES
+                )
             ),
         )
 
@@ -344,12 +389,14 @@ def primary_org_from_names(names: list[str]) -> str | None:
 
 
 def extract_resolved_date(changelog: list[dict[str, Any]]) -> datetime.datetime | None:
-    """Return the date when status changed to Closed, Resolved or Cancelled."""
-    closing = {"Closed", "Resolved", "Cancelled"}
+    """Return the date when status first changed to one of ``CLOSED_STATUSES``."""
     histories = sorted(changelog, key=lambda h: h.get("created") or datetime.datetime.min)
     for hist in histories:
         for item in hist.get("items", []):
-            if item.get("field") == "status" and item.get("toString") in closing:
+            if (
+                item.get("field") == "status"
+                and (item.get("toString") or "").lower() in CLOSED_STATUSES
+            ):
                 return hist.get("created")
     return None
 
@@ -626,19 +673,19 @@ def make_jira_ticket_calendar(
             weekdays_days_since_last_contact=days_since_contact,
             adjusted_resolution_days=adjusted_days,
             adjusted_resolution_weekdays=adjusted_weekdays,
-            is_junk=start_status.lower() == "cancelled",
+            is_junk=start_status.lower() in CANCELLED_STATUSES,
         )
         record.did_resolve = (
-            not day_start_status.lower().startswith("closed")
-            and record.end_status.lower() in {"resolved", "closed", "cancelled"}
+            day_start_status.lower() not in CLOSED_STATUSES
+            and record.end_status.lower() in CLOSED_STATUSES
         )
         results.append(record.__dict__)
 
-        if start_status.upper() not in STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME:
+        if start_status.lower() not in RESOLUTION_TIME_EXCLUDED_STATUSES:
             adjusted_days += 1
             if cur.isoweekday() < 6:
                 adjusted_weekdays += 1
-        if start_status.lower() not in {"resolved", "closed", "cancelled"}:
+        if start_status.lower() not in CLOSED_STATUSES:
             days_open += 1
         if day_public == 0 and cur.isoweekday() < 6:
             days_since_contact += 1
@@ -659,6 +706,9 @@ class DatabaseStore:
         support_issue_types: Iterable[str] | None = None,
         request_type_categories: Mapping[str, Iterable[str]] | None = None,
         request_type_category_default: str | None = DEFAULT_REQUEST_TYPE_CATEGORY,
+        closed_statuses: Iterable[str] | None = None,
+        cancelled_statuses: Iterable[str] | None = None,
+        no_contact_ignore_statuses: Iterable[str] | None = None,
     ):
         if engine is None:
             engine = create_engine("sqlite+pysqlite:///support_stats.sqlite")
@@ -680,6 +730,28 @@ class DatabaseStore:
             str(k): [str(p) for p in v] for k, v in request_type_categories.items()
         }
         self.request_type_category_default = request_type_category_default
+        self.closed_statuses = [
+            str(value)
+            for value in (
+                DEFAULT_CLOSED_STATUSES if closed_statuses is None else closed_statuses
+            )
+        ]
+        self.cancelled_statuses = [
+            str(value)
+            for value in (
+                DEFAULT_CANCELLED_STATUSES
+                if cancelled_statuses is None
+                else cancelled_statuses
+            )
+        ]
+        self.no_contact_ignore_statuses = [
+            str(value)
+            for value in (
+                DEFAULT_NO_CONTACT_IGNORE_STATUSES
+                if no_contact_ignore_statuses is None
+                else no_contact_ignore_statuses
+            )
+        ]
         self._prepare_schema()
 
     def _drop_view_if_exists(self, conn, view_name: str) -> None:
@@ -832,9 +904,32 @@ class DatabaseStore:
         )
         self.meta.create_all(self.engine)
 
-        # populate week to reporting month/quarter lookup; existing rows are kept
+        # week to reporting month/quarter lookup, covering every year from the
+        # oldest stored ticket to the current year; extended by insert_many
+        self._reporting_years: set[int] = set()
+        current_year = datetime.date.today().isocalendar().year
+        first_year = min(self._first_data_year() or current_year, current_year)
+        self._seed_week_reporting(range(first_year, current_year + 1))
+
+        self._create_views()
+
+    def _first_data_year(self) -> int | None:
+        """Return the year of the oldest stored ticket or calendar day."""
+        with self.engine.connect() as conn:
+            values = [
+                conn.execute(select(func.min(self.jira_tickets.c.created))).scalar(),
+                conn.execute(select(func.min(self.jira_calendar.c.date))).scalar(),
+            ]
+        years = [int(str(v)[:4]) for v in values if v]
+        return min(years) if years else None
+
+    def _seed_week_reporting(self, years: Iterable[int]) -> None:
+        """Add week_reporting rows for the given years; existing rows are kept."""
+        years = [y for y in years if y not in self._reporting_years]
+        if not years:
+            return
         rows = []
-        for year in REPORTING_YEARS:
+        for year in years:
             weeks_in_year = datetime.date(year, 12, 28).isocalendar().week
             for week in range(1, weeks_in_year + 1):
                 if week <= 5:
@@ -871,8 +966,7 @@ class DatabaseStore:
                 )
         with self.engine.begin() as conn:
             conn.execute(self.week_reporting.insert().prefix_with("OR IGNORE"), rows)
-
-        self._create_views()
+        self._reporting_years.update(years)
 
     def _create_views(self) -> None:
         """Create the reporting views and add columns missing in older databases."""
@@ -880,9 +974,20 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "reporting_weeks")
             conn.execute(text("CREATE VIEW reporting_weeks AS SELECT * FROM week_reporting"))
 
-        is_junk_expr = "CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END"
         def sql_str(value: str) -> str:
             return "'" + value.replace("'", "''") + "'"
+
+        def sql_status_list(statuses: Iterable[str]) -> str:
+            # lower-cased for comparison with LOWER(status); SQLite accepts an empty list
+            return ", ".join(sql_str(s.lower()) for s in statuses)
+
+        cancelled = sql_status_list(self.cancelled_statuses)
+        closed_statuses = sql_status_list(self.closed_statuses)
+
+        def not_cancelled(status_col: str) -> str:
+            return f"LOWER(COALESCE({status_col}, '')) NOT IN ({cancelled})"
+
+        is_junk_expr = f"CASE WHEN LOWER(jt.status) IN ({cancelled}) THEN 1 ELSE 0 END"
 
         when_clauses = [
             f"WHEN jt.request_type LIKE {sql_str(pattern)} THEN {sql_str(category)}"
@@ -1106,7 +1211,7 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "jira_tickets_worklogs")
             conn.execute(text(ticket_worklogs_view_sql))
 
-        statuses = ",".join(f"'{s.lower()}'" for s in NO_CONTACT_IGNORE_STATUSES)
+        statuses = sql_status_list(self.no_contact_ignore_statuses)
 
         summary_view_template = """
             CREATE VIEW {view_name} AS
@@ -1117,7 +1222,7 @@ class DatabaseStore:
                         COUNT(DISTINCT id) AS ongoing{active_category_cols}
                     FROM jira_tickets_active_weeks jtaw
                     JOIN week_reporting wr ON wr.calendar_week = active_week
-                    WHERE COALESCE(status, '') != 'Cancelled'
+                    WHERE {not_cancelled_jtaw}
                       {active_request_type_filter}
                       {active_support_filter}
                     GROUP BY wr.{period_col}
@@ -1137,8 +1242,8 @@ class DatabaseStore:
                     FROM jira_calendar jc
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
                     WHERE jc.weekday = 5
-                      AND LOWER(jc.end_status) NOT IN ('resolved','closed','cancelled')
-                      AND COALESCE(jt.status, '') != 'Cancelled'
+                      AND LOWER(jc.end_status) NOT IN ({closed_statuses})
+                      AND {not_cancelled_jt}
                       AND jc.is_junk != 1
                       {calendar_request_type_filter}
                       {calendar_support_filter}
@@ -1162,7 +1267,7 @@ class DatabaseStore:
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
                     JOIN week_reporting wr ON wr.calendar_week = jc.cw
                     WHERE jc.end_priority_pos > 0
-                      AND COALESCE(jt.status, '') != 'Cancelled'
+                      AND {not_cancelled_jt}
                       AND jc.is_junk != 1
                       {calendar_request_type_filter}
                       {calendar_support_filter}
@@ -1175,7 +1280,7 @@ class DatabaseStore:
                     JOIN week_reporting wr ON wr.calendar_week = jc.cw
                     WHERE jc.did_escalate_priority = 1
                       AND jc.end_priority_pos > jc.start_priority_pos
-                      AND COALESCE(jt.status, '') != 'Cancelled'
+                      AND {not_cancelled_jt}
                       AND jc.is_junk != 1
                       {calendar_request_type_filter}
                       {calendar_support_filter}
@@ -1185,7 +1290,7 @@ class DatabaseStore:
                     SELECT wr.{period_col} AS period, COUNT(*) AS new_tickets
                     FROM jira_tickets jt
                     JOIN week_reporting wr ON wr.calendar_week = jt.created_week
-                    WHERE COALESCE(jt.status, '') != 'Cancelled'
+                    WHERE {not_cancelled_jt}
                       {tickets_request_type_filter}
                       {tickets_support_filter}
                     GROUP BY wr.{period_col}
@@ -1205,7 +1310,7 @@ class DatabaseStore:
                     FROM jira_tickets_reporting jtr
                     JOIN week_reporting wr ON wr.calendar_week = jtr.resolved_week
                     WHERE jtr.resolved_week IS NOT NULL
-                      AND COALESCE(jtr.status, '') != 'Cancelled'
+                      AND {not_cancelled_jtr}
                       {reporting_request_type_filter}
                       {reporting_support_filter}
                     GROUP BY wr.{period_col}
@@ -1221,7 +1326,7 @@ class DatabaseStore:
                         FROM jira_tickets jt
                         JOIN week_reporting wr ON wr.calendar_week = jt.first_response_date_week
                         WHERE jt.first_response_time_minutes IS NOT NULL
-                          AND COALESCE(jt.status, '') != 'Cancelled'
+                          AND {not_cancelled_jt}
                           {tickets_request_type_filter}
                           {tickets_support_filter}
                     ) t
@@ -1288,6 +1393,10 @@ class DatabaseStore:
                 period_col=period_col,
                 select_cols=select_cols,
                 statuses=statuses,
+                closed_statuses=closed_statuses,
+                not_cancelled_jt=not_cancelled("jt.status"),
+                not_cancelled_jtr=not_cancelled("jtr.status"),
+                not_cancelled_jtaw=not_cancelled("status"),
                 aged_30_subquery=aged_30_subquery,
                 aged_5_subquery=aged_5_subquery,
                 aged_request_type_filter=aged_request_type_filter,
@@ -1486,10 +1595,26 @@ class DatabaseStore:
 
     @log_call
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
+        rows = list(rows)
         if not rows:
             return
+        if table is self.jira_tickets or table is self.jira_calendar:
+            self._extend_week_reporting(rows)
         with self.engine.begin() as conn:
-            conn.execute(table.insert().prefix_with("OR REPLACE"), list(rows))
+            conn.execute(table.insert().prefix_with("OR REPLACE"), rows)
+
+    def _extend_week_reporting(self, rows: list[dict[str, Any]]) -> None:
+        """Seed week_reporting so it spans the years of the inserted rows."""
+        years = {
+            value.isocalendar().year
+            for row in rows
+            for value in (row.get("created"), row.get("date"))
+            if isinstance(value, datetime.date)
+        }
+        if not years or years <= self._reporting_years:
+            return
+        known = years | self._reporting_years
+        self._seed_week_reporting(range(min(known), max(known) + 1))
 
     @log_call
     def newest_updated_ts(self) -> datetime.datetime | None:
@@ -1609,7 +1734,16 @@ class SupportStatsGetter:
             support_issue_types=config.support_issue_types,
             request_type_categories=config.request_type_categories,
             request_type_category_default=config.request_type_category_default,
+            closed_statuses=config.closed_statuses,
+            cancelled_statuses=config.cancelled_statuses,
+            no_contact_ignore_statuses=config.no_contact_ignore_statuses,
         )
+        global CLOSED_STATUSES, CANCELLED_STATUSES, RESOLUTION_TIME_EXCLUDED_STATUSES
+        CLOSED_STATUSES = {s.lower() for s in config.closed_statuses}
+        CANCELLED_STATUSES = {s.lower() for s in config.cancelled_statuses}
+        RESOLUTION_TIME_EXCLUDED_STATUSES = {
+            s.lower() for s in config.resolution_time_excluded_statuses
+        }
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
         global ORG_PATTERNS
