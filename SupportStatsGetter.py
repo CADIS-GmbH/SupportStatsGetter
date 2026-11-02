@@ -587,7 +587,7 @@ def make_jira_ticket_calendar(
                             if ts - pending_escalation_ts <= escalation_grace:
                                 pending_escalation_ts = None
                             else:
-                                if priority_pos > 0:    #only count if the ne prority is higher than 0 (A, AA)
+                                if prev_priority_pos > 0:    #only count if the escalated priority was higher than 0 (A, AA)
                                     day_escalated_priority = True
                                 pending_escalation_ts = None
                     elif field and field.lower() in {req_field_lower, "request type"}:
