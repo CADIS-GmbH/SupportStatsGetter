@@ -95,6 +95,49 @@ DEFAULT_SUPPORT_ISSUE_TYPES: list[str] = ["Support"]
 DEFAULT_REQUEST_TYPE_CATEGORIES: dict[str, list[str]] = {"HW": ["%Hardware%"]}
 DEFAULT_REQUEST_TYPE_CATEGORY = "SW"
 
+# Columns of the summary views shown in the dashboard KPI table:
+# (column, label, number format). Columns missing in a view are skipped.
+DASHBOARD_METRICS: list[tuple[str, str, str]] = [
+    ("new_tickets", "New", "0"),
+    ("closed_tickets", "Closed", "0"),
+    ("ongoing_tickets", "Active", "0"),
+    ("close_rate", "Close rate", "0%"),
+    ("median_first_reply_minutes", "Median first reply (min)", "0"),
+    ("avg_resolution_days", "Avg resolution (days)", "0.0"),
+    ("high_or_critical_tickets", "High / critical", "0"),
+    ("escalated_tickets", "Priority escalated", "0"),
+    ("overall_open", "Open on Fridays", "0.0"),
+    ("aged_5_plus", "Open > 5 days", "0"),
+    ("aged_30_plus", "Open > 30 days", "0"),
+    ("unassigned", "Unassigned", "0.0"),
+    ("over5_days_no_contact", "> 5 days no contact", "0.0"),
+    ("csat_score", "CSAT score", "0.00"),
+    ("csat_answers", "CSAT answers", "0"),
+]
+# Metrics without a value for periods without data; shown as #N/A so charts
+# leave a gap instead of dropping to 0.
+DASHBOARD_NULLABLE_METRICS = {
+    "median_first_reply_minutes",
+    "avg_resolution_days",
+    "close_rate",
+    "csat_score",
+}
+# Dashboard charts: (title, chart type, columns). "open_*" / "closed_*" expand
+# to the per-category columns.
+DASHBOARD_CHARTS: list[tuple[str, str, list[str]]] = [
+    ("New vs. closed tickets", "col", ["new_tickets", "closed_tickets"]),
+    ("Close rate (closed / new)", "line", ["close_rate"]),
+    ("Open backlog (Fridays)", "line", ["overall_open", "aged_5_plus", "aged_30_plus"]),
+    ("Unassigned and no contact (Fridays)", "line", ["unassigned", "over5_days_no_contact"]),
+    ("Median first reply (minutes)", "line", ["median_first_reply_minutes"]),
+    ("Average resolution time (days)", "line", ["avg_resolution_days"]),
+    ("Active tickets by category", "stacked", ["open_*"]),
+    ("Closed tickets by category", "stacked", ["closed_*"]),
+    ("High priority and escalations", "col", ["high_or_critical_tickets", "escalated_tickets"]),
+    ("CSAT score", "line", ["csat_score"]),
+]
+DASHBOARD_TOP_CUSTOMERS = 15
+
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
 JIRA_PULL_OVERLAP_MIN = 5 #60*24*7  #5
 
@@ -112,6 +155,13 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.chart import BarChart, LineChart
+from openpyxl.chart.data_source import AxDataSource, NumDataSource, NumRef, StrRef
+from openpyxl.chart.series import Series, SeriesLabel
+from openpyxl.formatting.rule import FormulaRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.workbook.defined_name import DefinedName
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
 def log_call(func):
@@ -164,6 +214,8 @@ class Config:
     excel_write_mode: Literal[
         "overwrite_with_backup", "overwrite", "no_overwrite"
     ] = "overwrite_with_backup"
+    # first quarter shown on the Excel dashboard, e.g. "2025.Q1"; None = one year back
+    dashboard_start_quarter: str | None = None
     custom_fields: dict[str, str] = field(default_factory=dict)
     non_support_request_types: list[str] = field(
         default_factory=lambda: DEFAULT_NON_SUPPORT_REQUEST_TYPES.copy()
@@ -209,6 +261,7 @@ class Config:
             log_file=Path(data.get("log_file", "support_stats.log")),
             output_excel=Path(data["output_excel"]) if data.get("output_excel") else None,
             excel_write_mode=data.get("excel_write_mode", "overwrite_with_backup"),
+            dashboard_start_quarter=data.get("dashboard_start_quarter"),
             custom_fields=data.get("custom_fields", {}),
             non_support_request_types=list(
                 data.get(
@@ -1211,6 +1264,67 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "jira_tickets_worklogs")
             conn.execute(text(ticket_worklogs_view_sql))
 
+        # per customer, week and request type category, counted like the summary views
+        customer_view_sql = f"""
+            CREATE VIEW customer_weekly_summary AS
+            WITH
+                support_tickets AS (
+                    SELECT
+                        jt.id,
+                        jt.created_week,
+                        jt.resolved_week,
+                        COALESCE(NULLIF(jt.primary_organization, ''), '(none)') AS organization,
+                        COALESCE({request_type_expr}, '(none)') AS request_type_category
+                    FROM jira_tickets jt
+                    WHERE {not_cancelled("jt.status")}
+                      {tickets_request_type_filter}
+                      {tickets_support_filter}
+                ),
+                created AS (
+                    SELECT created_week AS week, organization, request_type_category,
+                           COUNT(*) AS new_tickets
+                    FROM support_tickets
+                    GROUP BY created_week, organization, request_type_category
+                ),
+                resolved AS (
+                    SELECT resolved_week AS week, organization, request_type_category,
+                           COUNT(*) AS closed_tickets
+                    FROM support_tickets
+                    WHERE resolved_week IS NOT NULL
+                    GROUP BY resolved_week, organization, request_type_category
+                ),
+                logged AS (
+                    SELECT jw.started_week AS week, st.organization, st.request_type_category,
+                           SUM(jw.time_spent_minutes) / 60.0 AS hours_logged
+                    FROM jira_worklogs jw
+                    JOIN support_tickets st ON st.id = jw.ticket_id
+                    GROUP BY jw.started_week, st.organization, st.request_type_category
+                ),
+                keys AS (
+                    SELECT week, organization, request_type_category FROM created
+                    UNION SELECT week, organization, request_type_category FROM resolved
+                    UNION SELECT week, organization, request_type_category FROM logged
+                )
+            SELECT
+                k.week,
+                wr.reporting_month AS month,
+                wr.reporting_quarter AS quarter,
+                k.organization,
+                k.request_type_category,
+                COALESCE(c.new_tickets, 0) AS new_tickets,
+                COALESCE(r.closed_tickets, 0) AS closed_tickets,
+                COALESCE(l.hours_logged, 0) AS hours_logged
+            FROM keys k
+            JOIN week_reporting wr ON wr.calendar_week = k.week
+            LEFT JOIN created c USING (week, organization, request_type_category)
+            LEFT JOIN resolved r USING (week, organization, request_type_category)
+            LEFT JOIN logged l USING (week, organization, request_type_category)
+            ORDER BY k.week, k.organization, k.request_type_category
+        """
+        with self.engine.begin() as conn:
+            self._drop_view_if_exists(conn, "customer_weekly_summary")
+            conn.execute(text(customer_view_sql))
+
         statuses = sql_status_list(self.no_contact_ignore_statuses)
 
         summary_view_template = """
@@ -1824,6 +1938,7 @@ class SupportStatsGetter:
                     v = f"'{v}"
             return v
 
+        exported: dict[str, tuple[str, pd.DataFrame]] = {}
         for idx, view in enumerate(views, start=1):
             logging.info("Writing view %d/%d: %s", idx, total_views, view)
             df = pd.read_sql_query(f'SELECT * FROM "{view}"', self.store.engine)
@@ -1835,6 +1950,7 @@ class SupportStatsGetter:
                         pass
                 df[col] = df[col].apply(sanitize_value)
             safe_name = re.sub(r'[/\\*?:\[\]]', '_', view)[:31]
+            exported[view] = (safe_name, df)
             if safe_name in wb.sheetnames:
                 ws = wb[safe_name]
                 if ws.tables:
@@ -1864,8 +1980,369 @@ class SupportStatsGetter:
                 for row in dataframe_to_rows(df, index=False, header=True):
                     ws.append([sanitize_value(v) for v in row])
 
+        self._write_dashboard(wb, exported)
         wb.save(output_file)
         logging.info("Finished exporting Excel workbook to %s", output_file)
+
+    def _write_dashboard(
+        self,
+        wb: Workbook,
+        exported: Mapping[str, tuple[str, pd.DataFrame]],
+    ) -> None:
+        """Add a formula-driven KPI dashboard in front of the exported view sheets.
+
+        The dashboard shows the summary views from a selectable start quarter up
+        to the current period. Start quarter, granularity and whether the
+        current (incomplete) period is included are input cells; tables and
+        charts follow them through formulas and OFFSET-based names, so no pivot
+        tables or refresh are needed.
+        """
+        period_views = {
+            "weekly_support_summary": "week",
+            "monthly_support_summary": "month",
+            "quarterly_support_summary": "quarter",
+        }
+        if any(v not in exported or exported[v][1].empty for v in period_views):
+            logging.info("Summary views missing or empty, skipping dashboard")
+            return
+        weekly = exported["weekly_support_summary"][1]
+
+        def rng(view: str, col: str) -> str:
+            sheet, df = exported[view]
+            letter = get_column_letter(df.columns.get_loc(col) + 1)
+            return f"'{sheet}'!${letter}$2:${letter}${len(df) + 1}"
+
+        def choose(cols: Mapping[str, str]) -> str:
+            ranges = ",".join(rng(view, cols[view]) for view in period_views)
+            return f"CHOOSE(dashboard_calc!$B$5,{ranges})"
+
+        def in_all_views(col: str) -> bool:
+            return all(col in exported[v][1].columns for v in period_views)
+
+        # "now" is the export date, mapped to its reporting month and quarter
+        today = datetime.date.today()
+        today_week = cw_string_from_datetime(datetime.datetime.combine(today, datetime.time()))
+        weeks = [str(w) for w in weekly["week"]]
+        now_week = max((w for w in weeks if w <= today_week), default=weeks[0])
+        now_row = weekly[weekly["week"] == now_week].iloc[0]
+        now_month, now_quarter = str(now_row["month"]), str(now_row["quarter"])
+        quarters = [
+            str(q) for q in exported["quarterly_support_summary"][1]["quarter"]
+            if str(q) <= now_quarter
+        ]
+        start_quarter = self.config.dashboard_start_quarter
+        if start_quarter not in quarters:
+            start_quarter = quarters[max(0, quarters.index(now_quarter) - 4)]
+
+        period_by_view = dict(period_views)
+        quarter_by_view = {v: "quarter" for v in period_views}
+
+        # hidden helper sheet with the window calculation and dropdown lists
+        calc = wb.create_sheet("dashboard_calc")
+        calc.sheet_state = "hidden"
+        calc_rows = [
+            ("now_week", now_week),
+            ("now_month", now_month),
+            ("now_quarter", now_quarter),
+            ("start_quarter", '=""&Dashboard!$C$4'),
+            ("granularity", '=MATCH(Dashboard!$C$5,{"Week","Month","Quarter"},0)'),
+            ("first_row", f"=MATCH(B4,{choose(quarter_by_view)},0)"),
+            (
+                "last_row",
+                f"=MATCH(CHOOSE(B5,B1,B2,B3),{choose(period_by_view)},0)"
+                '-IF(Dashboard!$C$6="Yes",0,1)',
+            ),
+            ("periods", "=IFERROR(MAX(0,B7-B6+1),0)"),
+            (
+                "last_full_period",
+                f"=IFERROR(INDEX({choose(period_by_view)},"
+                f'MATCH(CHOOSE(B5,B1,B2,B3),{choose(period_by_view)},0)-1),"")',
+            ),
+            ("first_period", f'=IF(B8>0,INDEX({choose(period_by_view)},B6),"")'),
+            ("last_period", f'=IF(B8>0,INDEX({choose(period_by_view)},B6+B8-1),"")'),
+        ]
+        for row, (label, value) in enumerate(calc_rows, start=1):
+            calc.cell(row=row, column=1, value=label)
+            calc.cell(row=row, column=2, value=value)
+        calc["D1"] = "quarters"
+        for row, quarter in enumerate(quarters, start=2):
+            calc.cell(row=row, column=4, value=quarter)
+
+        dash = wb.create_sheet("Dashboard")
+        wb.move_sheet(dash, offset=-wb.index(dash))
+        for ws in wb.worksheets:
+            ws.sheet_view.tabSelected = ws is dash
+        wb.active = 0
+        wb.calculation.fullCalcOnLoad = True
+
+        input_fill = PatternFill("solid", fgColor="FFF2CC")
+        header_fill = PatternFill("solid", fgColor="DDEBF7")
+        thin = Side(style="thin", color="A6A6A6")
+        box = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        dash["A1"] = "Support KPI dashboard"
+        dash["A1"].font = Font(bold=True, size=16)
+        dash["A2"] = (
+            f"Data as of {today.isoformat()} (week {now_week}). Change the yellow "
+            "cells; tables and charts follow automatically."
+        )
+        dash["A2"].font = Font(italic=True, color="595959")
+        controls = [
+            ("Start quarter", start_quarter, f"dashboard_calc!$D$2:$D${len(quarters) + 1}"),
+            ("Granularity", "Week", '"Week,Month,Quarter"'),
+            # the current period is incomplete and would pull every chart down at the end
+            ("Include current period", "No", '"Yes,No"'),
+        ]
+        for row, (label, value, options) in enumerate(controls, start=4):
+            dash.cell(row=row, column=1, value=label).font = Font(bold=True)
+            cell = dash.cell(row=row, column=3, value=value)
+            cell.fill, cell.border, cell.font = input_fill, box, Font(bold=True)
+            dv = DataValidation(type="list", formula1=options, allow_blank=False)
+            dv.add(cell)
+            dash.add_data_validation(dv)
+        dash["E4"] = "Showing:"
+        dash["E4"].font = Font(bold=True)
+        dash["F4"] = (
+            '=IF(dashboard_calc!$B$8>0,dashboard_calc!$B$10&" to "&dashboard_calc!$B$11'
+            '&" ("&dashboard_calc!$B$8&" periods)","no data for this selection")'
+        )
+
+        # KPI table columns: period, metrics, per-category active/closed
+        columns: list[tuple[str, str, str]] = [
+            (col, label, fmt) for col, label, fmt in DASHBOARD_METRICS if in_all_views(col)
+        ]
+        for prefix, label in (("open_", "Active"), ("closed_", "Closed")):
+            columns += [
+                (col, f"{label} {col[len(prefix):].upper()}", "0")
+                for col in weekly.columns
+                if col.startswith(prefix) and col != "closed_tickets" and in_all_views(col)
+            ]
+
+        charts = []
+        for title, kind, wanted in DASHBOARD_CHARTS:
+            cols = []
+            for want in wanted:
+                if want.endswith("*"):
+                    cols += [
+                        c for c, _, _ in columns
+                        if c.startswith(want[:-1]) and c != "closed_tickets"
+                    ]
+                elif any(c == want for c, _, _ in columns):
+                    cols.append(want)
+            if cols:
+                charts.append((title, kind, cols))
+
+        customers = exported.get("customer_weekly_summary")
+        has_customers = customers is not None and not customers[1].empty
+        # per-customer measures: (chart title or None, table header, column, category)
+        cust_measures: list[tuple[str | None, str, str, str | None]] = []
+        if has_customers:
+            cats = sorted({str(c) for c in customers[1]["request_type_category"]})
+            cust_measures.append(("New tickets per customer", "New", "new_tickets", None))
+            if len(cats) > 1:
+                cust_measures += [
+                    (f"New {cat} tickets per customer", f"New {cat}", "new_tickets", cat)
+                    for cat in cats
+                ]
+            cust_measures += [
+                (None, "Closed", "closed_tickets", None),
+                ("Hours logged per customer", "Hours logged", "hours_logged", None),
+            ]
+        cust_charts = [m for m in cust_measures if m[0]]
+        cust_row = 8 + 15 * ((len(charts) + 1) // 2)
+        cust_table_row = cust_row + 1 + 15 * ((len(cust_charts) + 1) // 2)
+        table_row = (
+            cust_table_row + DASHBOARD_TOP_CUSTOMERS + 3 if has_customers else cust_row
+        )
+        first = table_row + 1
+        max_rows = len(weekly)
+
+        dash.column_dimensions["A"].width = 22 if has_customers else 12
+        for idx in range(2, len(columns) + 2):
+            dash.column_dimensions[get_column_letter(idx)].width = 11
+
+        dash.cell(row=table_row, column=1, value="Period")
+        for idx, (col, label, fmt) in enumerate(columns, start=2):
+            dash.cell(row=table_row, column=idx, value=label)
+        for idx in range(1, len(columns) + 2):
+            cell = dash.cell(row=table_row, column=idx)
+            cell.font, cell.fill, cell.border = Font(bold=True), header_fill, box
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        dash.row_dimensions[table_row].height = 30
+
+        sources = [("period", period_by_view, "@", False)] + [
+            (col, {v: col for v in period_views}, fmt, col in DASHBOARD_NULLABLE_METRICS)
+            for col, _, fmt in columns
+        ]
+        for idx, (_, cols, fmt, nullable) in enumerate(sources, start=1):
+            src = choose(cols)
+            for k in range(1, max_rows + 1):
+                value = f"INDEX({src},dashboard_calc!$B$6+{k - 1})"
+                if nullable:
+                    value = f'IF({value}="",NA(),{value})'
+                cell = dash.cell(
+                    row=first + k - 1,
+                    column=idx,
+                    value=f'=IF({k}>dashboard_calc!$B$8,"",{value})',
+                )
+                cell.number_format = fmt
+        last_col = get_column_letter(len(columns) + 1)
+        dash.conditional_formatting.add(
+            f"A{first}:{last_col}{first + max_rows - 1}",
+            FormulaRule(formula=[f"ISNA(A{first})"], font=Font(color="BFBFBF")),
+        )
+
+        def add_name(name: str, column: int, top: int, count: str, sheet: str = "Dashboard") -> str:
+            letter = get_column_letter(column)
+            dash.defined_names[name] = DefinedName(
+                name, attr_text=f"OFFSET({sheet}!${letter}${top},0,0,MAX(1,{count}),1)"
+            )
+            return f"Dashboard!{name}"
+
+        refs = {
+            col: add_name(f"Dash_{col}", idx, first, "dashboard_calc!$B$8")
+            for idx, (col, *_) in enumerate(sources, start=1)
+        }
+        labels = {col: label for col, label, _ in columns}
+        formats = {col: fmt for col, _, fmt in columns}
+
+        def series(values: str, categories: str, title: str) -> Series:
+            s = Series()
+            s.val = NumDataSource(numRef=NumRef(f=values))
+            s.cat = AxDataSource(strRef=StrRef(f=categories))
+            s.tx = SeriesLabel(v=title)
+            s.smooth = False
+            return s
+
+        def new_chart(kind: str, title: str):
+            if kind == "line":
+                chart = LineChart()
+            else:
+                chart = BarChart()
+                chart.type = "bar" if kind == "bar" else "col"
+                chart.gapWidth = 60
+                if kind == "stacked":
+                    chart.grouping, chart.overlap = "stacked", 100
+            chart.varyColors = False
+            chart.title = title
+            chart.title.overlay = False
+            chart.width, chart.height = 16, 7.5
+            chart.x_axis.delete = chart.y_axis.delete = False
+            chart.y_axis.number_format = "General"
+            chart.legend.position = "b"
+            chart.legend.overlay = False
+            return chart
+
+        for idx, (title, kind, cols) in enumerate(charts):
+            chart = new_chart(kind, title)
+            for col in cols:
+                chart.series.append(series(refs[col], refs["period"], labels[col]))
+            if len(cols) == 1:
+                chart.legend = None
+                if formats[cols[0]] == "0%":
+                    chart.y_axis.number_format = "0%"
+            anchor_col = "A" if idx % 2 == 0 else "J"
+            dash.add_chart(chart, f"{anchor_col}{8 + 15 * (idx // 2)}")
+
+        if not has_customers:
+            return
+
+        # customers in the last complete period of the selected granularity
+        cust_sheet, cust_df = customers
+        cust_ranges = {}
+        for col in (
+            "week", "month", "quarter", "organization", "request_type_category",
+            "new_tickets", "closed_tickets", "hours_logged",
+        ):
+            letter = get_column_letter(cust_df.columns.get_loc(col) + 1)
+            cust_ranges[col] = f"'{cust_sheet}'!${letter}$2:${letter}${len(cust_df) + 1}"
+        in_period = (
+            f"(CHOOSE($B$5,{cust_ranges['week']},{cust_ranges['month']},"
+            f"{cust_ranges['quarter']})=$B$9)"
+        )
+        orgs = sorted({str(o) for o in cust_df["organization"]})
+        end = len(orgs) + 1
+        calc["E1"], calc["F1"] = "customers_ranked", "organization"
+        for row, org in enumerate(orgs, start=2):
+            calc[f"F{row}"] = org
+        # per measure: value and tie-broken score per customer, then the ranked top list
+        values: list[str] = []
+        ranked: list[tuple[int, int]] = []
+        rank_base = 7 + 2 * len(cust_measures)
+        for j, (_, header, col, cat) in enumerate(cust_measures):
+            v, sc = get_column_letter(7 + 2 * j), get_column_letter(8 + 2 * j)
+            calc[f"{v}1"], calc[f"{sc}1"] = header, f"{header} rank"
+            cat_filter = ""
+            if cat:
+                quoted = cat.replace('"', '""')
+                cat_filter = f'*({cust_ranges["request_type_category"]}="{quoted}")'
+            for row in range(2, end + 1):
+                calc[f"{v}{row}"] = (
+                    f"=SUMPRODUCT(({cust_ranges['organization']}=$F{row})*{in_period}"
+                    f"{cat_filter}*{cust_ranges[col]})"
+                )
+                calc[f"{sc}{row}"] = f"={v}{row}+ROW()/1000000000"
+            calc[f"E{j + 2}"] = (
+                f'=MIN({DASHBOARD_TOP_CUSTOMERS},COUNTIF(${v}$2:${v}${end},">0"))'
+            )
+            values.append(f"dashboard_calc!${v}$2:${v}${end}")
+            org_col, top_col = rank_base + 2 * j, rank_base + 2 * j + 1
+            o, t = get_column_letter(org_col), get_column_letter(top_col)
+            calc[f"{o}1"], calc[f"{t}1"] = f"{header} customer", f"{header} top"
+            scores = f"${sc}$2:${sc}${end}"
+            for i in range(1, DASHBOARD_TOP_CUSTOMERS + 1):
+                match = f"MATCH(LARGE({scores},{i}),{scores},0)"
+                guard = f'IF({i}>$E${j + 2},"",'
+                calc[f"{o}{i + 1}"] = f"={guard}INDEX($F$2:$F${end},{match}))"
+                calc[f"{t}{i + 1}"] = f"={guard}INDEX(${v}$2:${v}${end},{match}))"
+            ranked.append((org_col, top_col))
+
+        dash[f"A{cust_row}"] = "Customers in the last complete period:"
+        dash[f"C{cust_row}"] = '=IF(dashboard_calc!$B$9="","none",dashboard_calc!$B$9)'
+        for ref in (f"A{cust_row}", f"C{cust_row}"):
+            dash[ref].font = Font(bold=True, size=13)
+        chart_idx = 0
+        for j, (title, *_) in enumerate(cust_measures):
+            if not title:
+                continue
+            org_col, top_col = ranked[j]
+            count = f"dashboard_calc!$E${j + 2}"
+            chart = new_chart("bar", title)
+            chart.x_axis.scaling.orientation = "maxMin"
+            chart.x_axis.tickLblSkip = 1
+            chart.y_axis.crosses = "max"
+            chart.legend = None
+            chart.series.append(
+                series(
+                    add_name(f"Dash_cust{j}_top", top_col, 2, count, "dashboard_calc"),
+                    add_name(f"Dash_cust{j}_org", org_col, 2, count, "dashboard_calc"),
+                    title,
+                )
+            )
+            anchor_col = "A" if chart_idx % 2 == 0 else "J"
+            dash.add_chart(chart, f"{anchor_col}{cust_row + 1 + 15 * (chart_idx // 2)}")
+            chart_idx += 1
+
+        # customer table, ranked by new tickets
+        headers = ["Customer"] + [header for _, header, _, _ in cust_measures]
+        for c, header in enumerate(headers, start=1):
+            cell = dash.cell(row=cust_table_row, column=c, value=header)
+            cell.font, cell.fill, cell.border = Font(bold=True), header_fill, box
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        org_letter = get_column_letter(ranked[0][0])
+        for i in range(1, DASHBOARD_TOP_CUSTOMERS + 1):
+            row = cust_table_row + i
+            dash.cell(row=row, column=1, value=f"=dashboard_calc!${org_letter}${i + 1}")
+            for j, (_, _, col, _) in enumerate(cust_measures):
+                cell = dash.cell(
+                    row=row,
+                    column=j + 2,
+                    value=(
+                        f'=IF($A{row}="","",INDEX({values[j]},'
+                        f"MATCH($A{row},dashboard_calc!$F$2:$F${end},0)))"
+                    ),
+                )
+                cell.number_format = "0.0" if col == "hours_logged" else "0"
 
     @log_call
     def recalculate_all(self) -> None:

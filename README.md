@@ -79,6 +79,7 @@ for example after changing the configuration.
 | `base_jql` | JQL that limits which tickets are fetched, e.g. `project = DEMO`. |
 | `log_level`, `log_file` | Logging settings. |
 | `output_excel`, `excel_write_mode` | Excel export target and overwrite behaviour (see below). |
+| `dashboard_start_quarter` | Start quarter preselected on the Excel dashboard, e.g. `"2025.Q1"`. Default: the same quarter one year back. |
 | `custom_fields` | Maps logical field names to the Jira custom field IDs of your instance. Supported names: `request_type`, `deployment_type`, `organizations`, `satisfaction`, `satisfaction_ts`, `work_category`, `sentiment`, `request_participants`. |
 | `non_support_request_types` | Request types that are excluded from the support KPIs in the summary views. Default: none. |
 | `support_issue_types` | Issue types counted in the summary views (case-insensitive). Default: `["Support"]`. An empty list counts all issue types. |
@@ -109,6 +110,27 @@ The behaviour when the file already exists is controlled by `excel_write_mode`:
 - `overwrite_with_backup` – overwrite the entire file but create a timestamped backup (default).
 - `overwrite` – replace the entire file without creating a backup.
 - `no_overwrite` – abort if the target exists.
+
+### Dashboard
+
+The first sheet, `Dashboard`, shows the support KPIs from a start quarter up to
+the export date as charts and a table. Three input cells control it:
+
+- **Start quarter** – first quarter shown (preset from `dashboard_start_quarter`).
+- **Granularity** – one row per `Week`, `Month` or `Quarter`.
+- **Include current period** – `Yes` adds the current, incomplete week, month or quarter (default `No`).
+
+Below the period charts, the customer section shows the top 15 customers by new
+tickets (in total and per request type category) and by hours logged, plus a
+table, for the **last complete** week, month or quarter of the selected
+granularity.
+
+The dashboard is built from formulas on the `weekly_support_summary`,
+`monthly_support_summary`, `quarterly_support_summary` and
+`customer_weekly_summary` sheets, so it updates immediately without pivot
+tables or a data refresh. Its helper cells are on the hidden `dashboard_calc`
+sheet. Empty values (e.g. no first reply in a week) show as `#N/A` so the line
+charts leave a gap instead of dropping to 0.
 
 ## Database tables
 

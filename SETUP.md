@@ -133,11 +133,18 @@ otherwise.
 
 ## 7. Result
 
-The Excel workbook has one sheet per database view. The most important ones:
+The first sheet, `Dashboard`, shows the KPIs as charts and a table. Pick the
+start quarter, the granularity (week, month, quarter) and whether the current
+period is included in the yellow cells; everything else follows. The default
+start quarter can be set with `dashboard_start_quarter` in the config.
+
+After the dashboard, the workbook has one sheet per database view. The most important ones:
 
 - `weekly_support_summary`, `monthly_support_summary`,
   `quarterly_support_summary` – the KPIs per period: new, closed, open and
   aged tickets, escalations, first reply time, resolution time, CSAT.
+- `customer_weekly_summary` – new and closed tickets and logged hours per
+  customer, week and request type category.
 - `jira_tickets_reporting` – one row per ticket with all KPI fields.
 - `jira_calendar_reporting` – one row per ticket and day.
 
