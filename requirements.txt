@@ -5,3 +5,4 @@ SQLAlchemy>=2.0.42,<2.1
 html2text
 pandas
 openpyxl
+PyYAML

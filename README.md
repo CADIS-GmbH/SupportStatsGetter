@@ -6,63 +6,14 @@ For step-by-step setup instructions see [SETUP.md](SETUP.md).
 
 ## Usage
 
-1. Create a `config.json` file with your Jira credentials. You can optionally specify a base JQL query to limit the scope of fetched tickets. A sample configuration is provided as `config.example.json`:
-```json
-{
-  "jira_base_url": "https://example.atlassian.net",
-  "jira_user": "your-email@example.com",
-  "jira_token": "api-token",
-  "db_path": "support_stats.sqlite",
-  "base_jql": "project = DEMO",
-  "log_level": "INFO",
-  "log_file": "support_stats.log",
-  "output_excel": "SupportStats.xlsx",
-  "excel_write_mode": "overwrite_with_backup",
-  "custom_fields": {
-    "request_type": "customfield_10010",
-    "deployment_type": "customfield_10011",
-    "organizations": "customfield_10002",
-    "request_participants": "customfield_10014",
-    "satisfaction": "customfield_10012",
-    "satisfaction_ts": "customfield_10013"
-  },
-  "non_support_request_types": [
-    "Licensing and billing questions"
-  ],
-  "support_issue_types": [
-    "Support"
-  ],
-  "request_type_categories": {
-    "HW": ["%Hardware%"]
-  },
-  "request_type_category_default": "SW",
-  "closed_statuses": ["Resolved", "Closed", "Cancelled"],
-  "cancelled_statuses": ["Cancelled"],
-  "resolution_time_excluded_statuses": [
-    "Closed",
-    "Cancelled",
-    "Resolved",
-    "Waiting for customer",
-    "Pending"
-  ],
-  "no_contact_ignore_statuses": ["Closed", "Resolved", "Cancelled", "Pending"],
-  "priority_deescalation_ignore_minutes": 5,
-  "priority_positions": {
-    "Lowest": -200,
-    "Low": -100,
-    "Medium": 0,
-    "High": 100,
-    "Highest": 200
-  }
-}
-```
+1. Copy `config.example.yaml` to `config.yaml` and fill in your Jira site, credentials and custom field IDs. The example lists every option with a comment explaining it and its default; options you leave out use the default. Existing `config.json` files keep working.
 2. Install the dependencies:
 ```bash
 pip install -r requirements.txt
 ```
-3. Run the script (optionally pass `--config` to specify the file and `--log-level` to override the configured log level):
+3. Run the script. Without `--config` it reads `config.yaml`, or `config.json` if there is no `config.yaml`; `--log-level` overrides the configured log level:
 ```bash
-python SupportStatsGetter.py --config config.json --log-level DEBUG
+python SupportStatsGetter.py --config config.yaml --log-level DEBUG
 ```
 Fetched tickets will be stored in the SQLite database specified in the config file.
 Subsequent runs only request tickets updated after the newest record already stored.
@@ -73,6 +24,8 @@ for example after changing the configuration.
 
 ## Configuration
 
+The config file is YAML (`.yaml`/`.yml`) or JSON. `config.example.yaml` documents every option; unknown options are reported as a warning at startup.
+
 | Key | Description |
 | --- | --- |
 | `jira_base_url`, `jira_user`, `jira_token` | Jira Cloud URL and API credentials. |
@@ -81,12 +34,12 @@ for example after changing the configuration.
 | `log_level`, `log_file` | Logging settings. |
 | `output_excel`, `excel_write_mode` | Excel export target and overwrite behaviour (see below). |
 | `dashboard_start_quarter` | Start quarter preselected on the Excel dashboard, e.g. `"2025.Q1"`. Default: the same quarter one year back. |
-| `custom_fields` | Maps logical field names to the Jira custom field IDs of your instance. Supported names: `request_type`, `deployment_type`, `organizations`, `satisfaction`, `satisfaction_ts`, `work_category`, `sentiment`, `request_participants`. |
+| `custom_fields` | Maps logical field names to the Jira custom field IDs of your instance. Supported names: `request_type`, `deployment_type`, `organizations`, `satisfaction`, `satisfaction_ts`, `work_category`, `sentiment`, `request_participants`, `resolution`. |
 | `non_support_request_types` | Request types that are excluded from the support KPIs in the summary views. Default: none. |
 | `support_issue_types` | Issue types counted in the summary views (case-insensitive). Default: `["Support"]`. An empty list counts all issue types. |
 | `request_type_categories` | Groups request types into categories for the summary views. Each category has a list of SQL `LIKE` patterns (`%` = any text, case-insensitive) matched against the request type; the first matching category wins. The summary views get an `open_<category>` and a `closed_<category>` column per category. Default: `{"HW": ["%Hardware%"]}`. |
 | `request_type_category_default` | Category for request types that match no pattern. Default: `SW`. Set to `null` together with an empty `request_type_categories` to drop the category columns. |
-| `priority_positions` | Maps Jira priority names to a numeric position. Positions above `0` count as high priority, and a raise to a position above `0` counts as an escalation. Unknown priorities get `0`. Defaults to the standard Jira priorities shown above. |
+| `priority_positions` | Maps Jira priority names to a numeric position. Positions above `0` count as high priority, and a raise to a position above `0` counts as an escalation. Unknown priorities get `0`. Defaults to the standard Jira priorities (see `config.example.yaml`). |
 | `closed_statuses` | Statuses in which a ticket counts as closed: sets the resolved date and stops the open-day count, and closed tickets are left out of the open ticket counts. Default: `["Resolved", "Closed", "Cancelled"]`. |
 | `cancelled_statuses` | Statuses that mark a ticket as cancelled (`is_junk`); these tickets are left out of the summary views. Default: `["Cancelled"]`. |
 | `resolution_time_excluded_statuses` | Days that start in one of these statuses do not count towards the adjusted resolution time. Default: `["Closed", "Cancelled", "Resolved", "Waiting for customer", "Pending"]`. |

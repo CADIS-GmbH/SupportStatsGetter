@@ -14,7 +14,7 @@ import inspect
 import argparse
 import json
 import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Iterable, Pattern, Mapping, Literal
 import re
@@ -144,6 +144,7 @@ JIRA_PULL_OVERLAP_MIN = 5 #60*24*7  #5
 import requests
 import dateutil.parser
 import pytz
+import yaml
 import pandas as pd
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, DateTime, Boolean,
@@ -249,8 +250,15 @@ class Config:
     @staticmethod
     @log_call
     def load(path: Path) -> "Config":
+        """Load a YAML (.yaml/.yml) or JSON config file."""
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            if Path(path).suffix.lower() in (".yaml", ".yml"):
+                data = yaml.safe_load(f) or {}
+            else:
+                data = json.load(f)
+        unknown = sorted(set(data) - {option.name for option in fields(Config)})
+        if unknown:
+            logging.warning("Unknown config options in %s: %s", path, ", ".join(unknown))
         return Config(
             db_path=Path(data.get("db_path", "support_stats.sqlite")),
             jira_base_url=data.get("jira_base_url"),
@@ -2830,8 +2838,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         "-c",
-        default="config.json",
-        help="Path to the configuration JSON file",
+        default=None,
+        help="Path to the YAML (or JSON) config file. Default: config.yaml, else config.json",
     )
     parser.add_argument(
         "--log-level",
@@ -2872,7 +2880,14 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    cfg_path = Path(args.config)
+    if args.config:
+        cfg_path = Path(args.config)
+    else:
+        # older installations still use config.json
+        cfg_path = next(
+            (p for p in (Path("config.yaml"), Path("config.json")) if p.exists()),
+            Path("config.yaml"),
+        )
     if not cfg_path.exists():
         logging.basicConfig(level=logging.ERROR)
         logging.error(f"No configuration file found at {cfg_path}.")

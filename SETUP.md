@@ -33,20 +33,20 @@ required packages into it.
 Copy the example and open it in an editor:
 
 ```powershell
-Copy-Item config.example.json config.json
-notepad config.json
+Copy-Item config.example.yaml config.yaml
+notepad config.yaml
 ```
 
-The example contains the settings of another company. Replace **every** value
-with your own:
+Every option has a comment explaining what it does and its default. Replace the
+placeholder values with your own, at least:
 
 | Setting | What to enter |
 | --- | --- |
 | `jira_base_url` | Your Jira URL, e.g. `https://yourcompany.atlassian.net` |
 | `jira_user` / `jira_token` | The Jira user's email address and the API token |
 | `base_jql` | Which tickets to collect, e.g. `project = "SUP"` (your project key) |
-| `db_path` | Where the database is stored, e.g. `C:\\SupportStats\\support_stats.sqlite` |
-| `output_excel` | Where the Excel report is written, e.g. `C:\\SupportStats\\SupportStats.xlsx` |
+| `db_path` | Where the database is stored, e.g. `C:\SupportStats\support_stats.sqlite` |
+| `output_excel` | Where the Excel report is written, e.g. `C:\SupportStats\SupportStats.xlsx` |
 | `log_file` | Log file location |
 | `custom_fields` | The custom field IDs of **your** Jira (see below). Remove entries you don't have. |
 | `non_support_request_types` | Request types that should not count as support, or `[]` |
@@ -57,10 +57,13 @@ with your own:
 
 Notes:
 
-- In JSON, backslashes in paths must be doubled: `C:\\SupportStats\\...`.
+- Put Windows paths in **single** quotes:
+  `db_path: 'C:\SupportStats\support_stats.sqlite'`. In double quotes a
+  backslash starts an escape (`\t` is a tab), so the path would break.
 - The folders for the database, Excel file and log must exist; create them
   first, e.g. `New-Item -ItemType Directory -Force C:\SupportStats`.
-- `config.json` contains your API token. Don't share it.
+- `config.yaml` contains your API token. Don't share it.
+- An older `config.json` still works; pass it with `-c config.json`.
 
 **Finding custom field IDs:** open this URL in a browser while logged in to
 Jira: `https://yourcompany.atlassian.net/rest/api/3/field`. Search for the
@@ -70,7 +73,7 @@ field name (e.g. "Request Type", "Satisfaction", "Organizations") and use its
 ## 4. First run
 
 ```powershell
-.\.venv\Scripts\python.exe SupportStatsGetter.py -c config.json
+.\.venv\Scripts\python.exe SupportStatsGetter.py -c config.yaml
 ```
 
 The first run creates the database and downloads **all** tickets that match
@@ -83,7 +86,7 @@ To skip old history, pass a start date. Only tickets updated on or after that
 date are downloaded:
 
 ```powershell
-.\.venv\Scripts\python.exe SupportStatsGetter.py -c config.json --start-date 2025-01-01
+.\.venv\Scripts\python.exe SupportStatsGetter.py -c config.yaml --start-date 2025-01-01
 ```
 
 The start date only applies to a new, empty database. Later runs fetch the
@@ -110,7 +113,7 @@ Click *Write Changes*, close DB Browser, then recalculate all tickets so the
 new settings are applied:
 
 ```powershell
-.\.venv\Scripts\python.exe SupportStatsGetter.py -c config.json --recalculate-all
+.\.venv\Scripts\python.exe SupportStatsGetter.py -c config.yaml --recalculate-all
 ```
 
 Run with `--recalculate-all` again whenever you change these tables or the
@@ -122,7 +125,7 @@ Later runs only download tickets that changed since the last run, so they are
 quick:
 
 ```powershell
-.\.venv\Scripts\python.exe SupportStatsGetter.py -c config.json
+.\.venv\Scripts\python.exe SupportStatsGetter.py -c config.yaml
 ```
 
 To run it automatically, adjust the folder in `GetSupport_KPI_example.bat`

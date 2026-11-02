@@ -4,6 +4,11 @@
 /BDKfull
 /NewSupportStatsGetter
 config_*.json
+config.json
+config.yaml
+config.yml
+config_*.yaml
+config_*.yml
 *.sqlite
 *.log
 /resource/
