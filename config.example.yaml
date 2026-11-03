@@ -40,16 +40,16 @@ custom_fields:
 # --- Files -------------------------------------------------------------------
 
 # SQLite database that holds all fetched data. The folder must exist.
-db_path: 'support_stats.sqlite'
+db_path: 'data\support_stats.sqlite'
 
 # Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL) and log file.
 # --log-level on the command line overrides log_level.
 log_level: INFO
-log_file: 'support_stats.log'
+log_file: 'data\support_stats.log'
 
 # Excel workbook written after each run; leave empty (null) for no export.
 # --output-excel on the command line overrides it.
-output_excel: 'SupportStats.xlsx'
+output_excel: 'data\SupportStats.xlsx'
 
 # What to do when the Excel file already exists:
 #   overwrite_with_backup - overwrite and keep a timestamped copy (default)
@@ -73,19 +73,28 @@ support_issue_types:
 non_support_request_types:
   - "Product trial questions"
 
-# Groups request types into categories. Each category lists SQL LIKE patterns
-# (% = any text, case-insensitive) matched against the request type; the first
-# match wins. The KPIs get an open_<category> and closed_<category> column per
-# category, and the dashboard shows customers per category.
-# Default: {HW: ["%Hardware%"]}
-request_type_categories:
-  HW:
-    - "%Hardware%"
+# Groups tickets into categories. Each category lists patterns; a ticket gets
+# the first category with a matching pattern. A pattern is either
+#   - a SQL LIKE pattern (% = any text, case-insensitive) for the request type, or
+#   - issue_type and/or request_type LIKE patterns that must all match (AND).
+# The KPIs get an open_<category> and closed_<category> column per category,
+# and the dashboard shows customers per category. Example:
+#   request_type_categories:
+#     Incident_HW:
+#       - issue_type: Incident
+#         request_type: "%Hardware%"
+#     Incident:
+#       - issue_type: Incident
+#     HW:
+#       - "%Hardware%"
+# Default (null): one category per issue type in support_issue_types, or per
+# stored issue type when that list is empty. {} = no categories.
+request_type_categories: null
 
-# Category for request types that match no pattern. Default: SW.
+# Category for tickets that match no pattern. Default: null (no category).
 # Set to null together with an empty request_type_categories ({}) to drop the
 # category columns.
-request_type_category_default: SW
+request_type_category_default: null
 
 # --- Statuses ----------------------------------------------------------------
 # Status names are matched case-insensitively.
@@ -112,13 +121,22 @@ resolution_time_excluded_statuses:
   - "Waiting for customer"
   - Pending
 
-# Tickets in these statuses are not counted in the "over 5 days no contact"
+# Tickets in these statuses are not counted in the "no contact" (no_contact_days)
 # KPI. Default: [Closed, Resolved, Cancelled, Pending]
 no_contact_ignore_statuses:
   - Closed
   - Resolved
   - Cancelled
   - Pending
+
+# --- Backlog thresholds ------------------------------------------------------
+# Open tickets on Fridays are counted when they are open longer than these
+# numbers of days, or had no contact for more than no_contact_days weekdays.
+# The Excel columns keep their names (aged_5_plus, aged_30_plus,
+# over5_days_no_contact); the dashboard labels show the configured values.
+aged_days_short: 5    # Default: 5
+aged_days_long: 30    # Default: 30
+no_contact_days: 5    # Default: 5
 
 # --- Priorities --------------------------------------------------------------
 

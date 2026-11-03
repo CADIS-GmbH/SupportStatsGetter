@@ -63,6 +63,14 @@ DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES: list[str] = [
     "Pending",
 ]
 
+# Day thresholds of the backlog KPIs: open longer than ``aged_days_short`` /
+# ``aged_days_long`` days (columns aged_5_plus / aged_30_plus) and more than
+# ``no_contact_days`` weekdays without contact (over5_days_no_contact). The
+# column names stay the same when the thresholds change.
+DEFAULT_AGED_DAYS_SHORT = 5
+DEFAULT_AGED_DAYS_LONG = 30
+DEFAULT_NO_CONTACT_DAYS = 5
+
 # Statuses that are treated as closed for the "over 5 days no contact" KPI.
 # Config: ``no_contact_ignore_statuses``.
 DEFAULT_NO_CONTACT_IGNORE_STATUSES: list[str] = [
@@ -88,12 +96,32 @@ DEFAULT_NON_SUPPORT_REQUEST_TYPES: list[str] = []
 DEFAULT_SUPPORT_ISSUE_TYPES: list[str] = ["Support"]
 
 # Request type categories used for the per-category columns in the summary
-# views: category -> SQL LIKE patterns matched against the request type. The
-# first matching category wins; unmatched tickets get the default category.
+# views: category -> patterns. A pattern is either a SQL LIKE pattern matched
+# against the request type, or a mapping with ``issue_type`` and/or
+# ``request_type`` LIKE patterns that must all match. The first matching
+# category wins; unmatched tickets get the default category. None gives one
+# category per issue type (the ``support_issue_types``, or every stored issue
+# type when that list is empty).
 # Can be set with ``request_type_categories`` and
 # ``request_type_category_default`` in the config file.
-DEFAULT_REQUEST_TYPE_CATEGORIES: dict[str, list[str]] = {"HW": ["%Hardware%"]}
-DEFAULT_REQUEST_TYPE_CATEGORY = "SW"
+CategoryPattern = str | dict[str, str]
+DEFAULT_REQUEST_TYPE_CATEGORIES: dict[str, list[CategoryPattern]] | None = None
+DEFAULT_REQUEST_TYPE_CATEGORY: str | None = None
+# pattern key -> jira_tickets column
+CATEGORY_PATTERN_COLUMNS = {"issue_type": "issuetype", "request_type": "request_type"}
+
+
+def normalize_category_pattern(pattern: Any) -> CategoryPattern:
+    """Validate a request type category pattern from the config."""
+    if isinstance(pattern, Mapping):
+        unknown = sorted(set(pattern) - set(CATEGORY_PATTERN_COLUMNS))
+        if unknown or not pattern:
+            raise ValueError(
+                f"Invalid request_type_categories pattern {dict(pattern)!r}: "
+                f"use the keys {', '.join(CATEGORY_PATTERN_COLUMNS)}"
+            )
+        return {str(k): str(v) for k, v in pattern.items()}
+    return str(pattern)
 
 # Columns of the summary views shown in the dashboard KPI table:
 # (column, label, number format). Columns missing in a view are skipped.
@@ -107,10 +135,11 @@ DASHBOARD_METRICS: list[tuple[str, str, str]] = [
     ("high_or_critical_tickets", "High / critical", "0"),
     ("escalated_tickets", "Priority escalated", "0"),
     ("overall_open", "Open on Fridays", "0.0"),
-    ("aged_5_plus", "Open > 5 days", "0"),
-    ("aged_30_plus", "Open > 30 days", "0"),
+    # {aged_days_short}, {aged_days_long} and {no_contact_days} come from the config
+    ("aged_5_plus", "Open > {aged_days_short} days", "0"),
+    ("aged_30_plus", "Open > {aged_days_long} days", "0"),
     ("unassigned", "Unassigned", "0.0"),
-    ("over5_days_no_contact", "> 5 days no contact", "0.0"),
+    ("over5_days_no_contact", "> {no_contact_days} days no contact", "0.0"),
     ("csat_score", "CSAT score", "0.00"),
     ("csat_answers", "CSAT answers", "0"),
 ]
@@ -228,11 +257,8 @@ class Config:
     support_issue_types: list[str] = field(
         default_factory=lambda: DEFAULT_SUPPORT_ISSUE_TYPES.copy()
     )
-    request_type_categories: dict[str, list[str]] = field(
-        default_factory=lambda: {
-            k: list(v) for k, v in DEFAULT_REQUEST_TYPE_CATEGORIES.items()
-        }
-    )
+    # None = one category per issue type
+    request_type_categories: dict[str, list[CategoryPattern]] | None = None
     request_type_category_default: str | None = DEFAULT_REQUEST_TYPE_CATEGORY
     closed_statuses: list[str] = field(
         default_factory=lambda: DEFAULT_CLOSED_STATUSES.copy()
@@ -246,6 +272,9 @@ class Config:
     no_contact_ignore_statuses: list[str] = field(
         default_factory=lambda: DEFAULT_NO_CONTACT_IGNORE_STATUSES.copy()
     )
+    aged_days_short: int = DEFAULT_AGED_DAYS_SHORT
+    aged_days_long: int = DEFAULT_AGED_DAYS_LONG
+    no_contact_days: int = DEFAULT_NO_CONTACT_DAYS
 
     @staticmethod
     @log_call
@@ -259,9 +288,16 @@ class Config:
         unknown = sorted(set(data) - {option.name for option in fields(Config)})
         if unknown:
             logging.warning("Unknown config options in %s: %s", path, ", ".join(unknown))
+
+        def as_list(key: str, default: list[str]) -> list[str]:
+            # a key without entries (YAML null) is an empty list
+            value = data.get(key, default)
+            return [] if value is None else list(value)
+
+        categories = data.get("request_type_categories", DEFAULT_REQUEST_TYPE_CATEGORIES)
         return Config(
             db_path=Path(data.get("db_path", "support_stats.sqlite")),
-            jira_base_url=data.get("jira_base_url"),
+            jira_base_url=(data.get("jira_base_url") or "").rstrip("/") or None,
             jira_user=data.get("jira_user"),
             jira_token=data.get("jira_token"),
             base_jql=data.get("base_jql"),
@@ -271,11 +307,8 @@ class Config:
             excel_write_mode=data.get("excel_write_mode", "overwrite_with_backup"),
             dashboard_start_quarter=data.get("dashboard_start_quarter"),
             custom_fields=data.get("custom_fields", {}),
-            non_support_request_types=list(
-                data.get(
-                    "non_support_request_types",
-                    DEFAULT_NON_SUPPORT_REQUEST_TYPES,
-                )
+            non_support_request_types=as_list(
+                "non_support_request_types", DEFAULT_NON_SUPPORT_REQUEST_TYPES
             ),
             priority_deescalation_ignore_minutes=data.get(
                 "priority_deescalation_ignore_minutes", 5
@@ -286,35 +319,30 @@ class Config:
                     "priority_positions", DEFAULT_PRIORITY_POSITIONS
                 ).items()
             },
-            support_issue_types=list(
-                data.get("support_issue_types", DEFAULT_SUPPORT_ISSUE_TYPES)
+            support_issue_types=as_list(
+                "support_issue_types", DEFAULT_SUPPORT_ISSUE_TYPES
             ),
-            request_type_categories={
-                str(k): [str(p) for p in v]
-                for k, v in data.get(
-                    "request_type_categories", DEFAULT_REQUEST_TYPE_CATEGORIES
-                ).items()
+            request_type_categories=None if categories is None else {
+                str(k): [normalize_category_pattern(p) for p in v]
+                for k, v in categories.items()
             },
             request_type_category_default=data.get(
                 "request_type_category_default", DEFAULT_REQUEST_TYPE_CATEGORY
             ),
-            closed_statuses=list(
-                data.get("closed_statuses", DEFAULT_CLOSED_STATUSES)
+            closed_statuses=as_list("closed_statuses", DEFAULT_CLOSED_STATUSES),
+            cancelled_statuses=as_list(
+                "cancelled_statuses", DEFAULT_CANCELLED_STATUSES
             ),
-            cancelled_statuses=list(
-                data.get("cancelled_statuses", DEFAULT_CANCELLED_STATUSES)
+            resolution_time_excluded_statuses=as_list(
+                "resolution_time_excluded_statuses",
+                DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES,
             ),
-            resolution_time_excluded_statuses=list(
-                data.get(
-                    "resolution_time_excluded_statuses",
-                    DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES,
-                )
+            no_contact_ignore_statuses=as_list(
+                "no_contact_ignore_statuses", DEFAULT_NO_CONTACT_IGNORE_STATUSES
             ),
-            no_contact_ignore_statuses=list(
-                data.get(
-                    "no_contact_ignore_statuses", DEFAULT_NO_CONTACT_IGNORE_STATUSES
-                )
-            ),
+            aged_days_short=int(data.get("aged_days_short", DEFAULT_AGED_DAYS_SHORT)),
+            aged_days_long=int(data.get("aged_days_long", DEFAULT_AGED_DAYS_LONG)),
+            no_contact_days=int(data.get("no_contact_days", DEFAULT_NO_CONTACT_DAYS)),
         )
 
 
@@ -765,11 +793,14 @@ class DatabaseStore:
         engine: Engine | None = None,
         non_support_request_types: Iterable[str] | None = None,
         support_issue_types: Iterable[str] | None = None,
-        request_type_categories: Mapping[str, Iterable[str]] | None = None,
+        request_type_categories: Mapping[str, Iterable[CategoryPattern]] | None = None,
         request_type_category_default: str | None = DEFAULT_REQUEST_TYPE_CATEGORY,
         closed_statuses: Iterable[str] | None = None,
         cancelled_statuses: Iterable[str] | None = None,
         no_contact_ignore_statuses: Iterable[str] | None = None,
+        aged_days_short: int = DEFAULT_AGED_DAYS_SHORT,
+        aged_days_long: int = DEFAULT_AGED_DAYS_LONG,
+        no_contact_days: int = DEFAULT_NO_CONTACT_DAYS,
     ):
         if engine is None:
             engine = create_engine("sqlite+pysqlite:///support_stats.sqlite")
@@ -785,10 +816,10 @@ class DatabaseStore:
             self.support_issue_types = DEFAULT_SUPPORT_ISSUE_TYPES.copy()
         else:
             self.support_issue_types = [str(value) for value in support_issue_types]
-        if request_type_categories is None:
-            request_type_categories = DEFAULT_REQUEST_TYPE_CATEGORIES
-        self.request_type_categories = {
-            str(k): [str(p) for p in v] for k, v in request_type_categories.items()
+        # None = one category per issue type, resolved when the views are created
+        self.request_type_categories = None if request_type_categories is None else {
+            str(k): [normalize_category_pattern(p) for p in v]
+            for k, v in request_type_categories.items()
         }
         self.request_type_category_default = request_type_category_default
         self.closed_statuses = [
@@ -813,6 +844,9 @@ class DatabaseStore:
                 else no_contact_ignore_statuses
             )
         ]
+        self.aged_days_short = int(aged_days_short)
+        self.aged_days_long = int(aged_days_long)
+        self.no_contact_days = int(no_contact_days)
         self._prepare_schema()
 
     def _drop_view_if_exists(self, conn, view_name: str) -> None:
@@ -1029,6 +1063,20 @@ class DatabaseStore:
             conn.execute(self.week_reporting.insert().prefix_with("OR IGNORE"), rows)
         self._reporting_years.update(years)
 
+    def _category_issue_types(self) -> list[str]:
+        """Issue types that get a category when no categories are configured."""
+        if self.support_issue_types:
+            return list(dict.fromkeys(self.support_issue_types))
+        with self.engine.connect() as conn:
+            return list(
+                conn.execute(
+                    select(self.jira_tickets.c.issuetype)
+                    .where(self.jira_tickets.c.issuetype.is_not(None))
+                    .distinct()
+                    .order_by(self.jira_tickets.c.issuetype)
+                ).scalars()
+            )
+
     def _create_views(self) -> None:
         """Create the reporting views and add columns missing in older databases."""
         with self.engine.begin() as conn:
@@ -1050,9 +1098,24 @@ class DatabaseStore:
 
         is_junk_expr = f"CASE WHEN LOWER(jt.status) IN ({cancelled}) THEN 1 ELSE 0 END"
 
+        def category_condition(pattern: CategoryPattern) -> str:
+            # a plain pattern matches the request type; a mapping ANDs its patterns
+            if isinstance(pattern, str):
+                pattern = {"request_type": pattern}
+            return " AND ".join(
+                f"jt.{CATEGORY_PATTERN_COLUMNS[key]} LIKE {sql_str(value)}"
+                for key, value in pattern.items()
+            )
+
+        request_type_categories = self.request_type_categories
+        if request_type_categories is None:
+            request_type_categories = {
+                issuetype: [{"issue_type": issuetype}]
+                for issuetype in self._category_issue_types()
+            }
         when_clauses = [
-            f"WHEN jt.request_type LIKE {sql_str(pattern)} THEN {sql_str(category)}"
-            for category, patterns in self.request_type_categories.items()
+            f"WHEN {category_condition(pattern)} THEN {sql_str(category)}"
+            for category, patterns in request_type_categories.items()
             for pattern in patterns
         ]
         default_category = (
@@ -1068,7 +1131,7 @@ class DatabaseStore:
             request_type_expr = default_category
 
         # one open_<category> / closed_<category> column per category
-        categories = list(self.request_type_categories)
+        categories = list(request_type_categories)
         if (
             self.request_type_category_default
             and self.request_type_category_default not in categories
@@ -1354,13 +1417,13 @@ class DatabaseStore:
                         jc.cw AS cw,
                         COUNT(DISTINCT jc.ticket_id) AS overall_open,
                         COUNT(DISTINCT CASE
-                            WHEN jc.total_days_open > 5 THEN jc.ticket_id
+                            WHEN jc.total_days_open > {aged_days_short} THEN jc.ticket_id
                         END) AS aged_5,
                         COUNT(DISTINCT CASE
-                            WHEN jc.total_days_open > 30 THEN jc.ticket_id
+                            WHEN jc.total_days_open > {aged_days_long} THEN jc.ticket_id
                         END) AS aged_30,
                         COUNT(DISTINCT CASE WHEN jc.end_assigned_user IS NULL OR jc.end_assigned_user = '' THEN jc.ticket_id END) AS unassigned,
-                        COUNT(DISTINCT CASE WHEN LOWER(jc.end_status) NOT IN ({statuses}) AND jc.weekdays_days_since_last_contact > 5 THEN jc.ticket_id END) AS over5_no_contact
+                        COUNT(DISTINCT CASE WHEN LOWER(jc.end_status) NOT IN ({statuses}) AND jc.weekdays_days_since_last_contact > {no_contact_days} THEN jc.ticket_id END) AS over5_no_contact
                     FROM jira_calendar jc
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
                     WHERE jc.weekday = 5
@@ -1515,6 +1578,9 @@ class DatabaseStore:
                 period_col=period_col,
                 select_cols=select_cols,
                 statuses=statuses,
+                aged_days_short=self.aged_days_short,
+                aged_days_long=self.aged_days_long,
+                no_contact_days=self.no_contact_days,
                 closed_statuses=closed_statuses,
                 not_cancelled_jt=not_cancelled("jt.status"),
                 not_cancelled_jtr=not_cancelled("jtr.status"),
@@ -1859,6 +1925,9 @@ class SupportStatsGetter:
             closed_statuses=config.closed_statuses,
             cancelled_statuses=config.cancelled_statuses,
             no_contact_ignore_statuses=config.no_contact_ignore_statuses,
+            aged_days_short=config.aged_days_short,
+            aged_days_long=config.aged_days_long,
+            no_contact_days=config.no_contact_days,
         )
         global CLOSED_STATUSES, CANCELLED_STATUSES, RESOLUTION_TIME_EXCLUDED_STATUSES
         CLOSED_STATUSES = {s.lower() for s in config.closed_statuses}
@@ -1913,6 +1982,12 @@ class SupportStatsGetter:
         mode:
             Behaviour when the target file already exists.
         """
+        if (
+            self.store.request_type_categories is None
+            and not self.store.support_issue_types
+        ):
+            # one category per stored issue type: pick up types fetched in this run
+            self.store._create_views()
         inspector = sa_inspect(self.store.engine)
         views = inspector.get_view_names()
         output_file = Path(output_file)
@@ -2116,8 +2191,15 @@ class SupportStatsGetter:
         )
 
         # KPI table columns: period, metrics, per-category active/closed
+        thresholds = {
+            "aged_days_short": self.config.aged_days_short,
+            "aged_days_long": self.config.aged_days_long,
+            "no_contact_days": self.config.no_contact_days,
+        }
         columns: list[tuple[str, str, str]] = [
-            (col, label, fmt) for col, label, fmt in DASHBOARD_METRICS if in_all_views(col)
+            (col, label.format(**thresholds), fmt)
+            for col, label, fmt in DASHBOARD_METRICS
+            if in_all_views(col)
         ]
         for prefix, label in (("open_", "Active"), ("closed_", "Closed")):
             columns += [
@@ -2396,6 +2478,18 @@ class SupportStatsGetter:
                     "displayName": issue_row.get("assignee"),
                     "emailAddress": issue_row.get("assignee_email"),
                 }
+            if issue_row.get("creator"):
+                fields["creator"] = {
+                    "displayName": issue_row.get("creator"),
+                    "emailAddress": issue_row.get("creator_email"),
+                }
+            if issue_row.get("request_participants"):
+                # stored as a comma-separated list of emails (or names)
+                fields["requestParticipants"] = [
+                    {"emailAddress": p}
+                    for p in issue_row["request_participants"].split(",")
+                    if p
+                ]
             if issue_row.get("labels"):
                 fields["labels"] = [l for l in issue_row.get("labels", "").split(",") if l]
             if issue_row.get("priority"):

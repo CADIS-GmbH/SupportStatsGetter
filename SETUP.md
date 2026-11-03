@@ -5,7 +5,7 @@ description of all settings, tables and views see [README.md](README.md).
 
 ## 1. Prerequisites
 
-- **Python 3.11 or newer** – download from <https://www.python.org/downloads/>.
+- **Python 3.13** (`RUN.bat` requires it; newer versions lack prebuilt packages for some dependencies) – download from <https://www.python.org/downloads/>.
   During installation tick *"Add python.exe to PATH"*.
 - **A Jira Service Management Cloud site** and a Jira user that can see all
   tickets of the service desk project, including internal comments (an agent
@@ -51,7 +51,7 @@ placeholder values with your own, at least:
 | `custom_fields` | The custom field IDs of **your** Jira (see below). Remove entries you don't have. |
 | `non_support_request_types` | Request types that should not count as support, or `[]` |
 | `support_issue_types` | Your support issue type name(s), e.g. `["Support"]` or `["Service Request", "Incident"]` |
-| `request_type_categories` / `request_type_category_default` | How request types are grouped in the reports, or `{}` / `null` for no grouping |
+| `request_type_categories` / `request_type_category_default` | How tickets are grouped in the reports by issue type and/or request type; default one group per issue type, `{}` / `null` for no grouping |
 | `priority_positions` | Your Jira priority names; positions above 0 count as high priority |
 | `closed_statuses`, `cancelled_statuses`, `resolution_time_excluded_statuses`, `no_contact_ignore_statuses` | Your workflow's status names (case doesn't matter); see the README for what each list does. Leave them out to use the defaults. |
 

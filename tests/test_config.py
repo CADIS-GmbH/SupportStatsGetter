@@ -24,7 +24,7 @@ def test_example_loads(caplog):
         config = Config.load(EXAMPLE)
     assert not caplog.records
     assert config.excel_write_mode == "overwrite_with_backup"
-    assert config.request_type_categories == {"HW": ["%Hardware%"]}
+    assert config.request_type_categories is None
     assert config.priority_positions["High"] == 100
     assert config.dashboard_start_quarter is None
 
@@ -48,6 +48,14 @@ def test_empty_yaml_uses_defaults(tmp_path):
     path = tmp_path / "config.yml"
     path.write_text("# nothing set\n", encoding="utf-8")
     assert Config.load(path) == Config()
+
+
+def test_list_option_without_entries_is_empty(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("non_support_request_types:\nsupport_issue_types:\n", encoding="utf-8")
+    config = Config.load(path)
+    assert config.non_support_request_types == []
+    assert config.support_issue_types == []
 
 
 def test_unknown_option_is_reported(tmp_path, caplog):

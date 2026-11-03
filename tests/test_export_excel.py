@@ -148,7 +148,11 @@ def _ticket(ticket_id, request_type, organization):
 
 
 def test_dashboard_customer_charts_per_category(tmp_path):
-    config = Config(db_path=tmp_path / "test.db")
+    config = Config(
+        db_path=tmp_path / "test.db",
+        request_type_categories={"HW": ["%Hardware%"]},
+        request_type_category_default="SW",
+    )
     getter = SupportStatsGetter(config)
     getter.store.insert_many(
         getter.store.jira_tickets,
