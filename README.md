@@ -123,3 +123,7 @@ Legacy ticket statuses are translated to the Jira status names using a built-in
 mapping. This ensures that metrics derived from imported data are consistent
 with records created directly in Jira.
 
+
+## License
+
+Copyright (c) 2024-2026 CADIS GmbH. All rights reserved. See [LICENSE](LICENSE).
