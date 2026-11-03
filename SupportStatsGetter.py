@@ -501,16 +501,24 @@ def primary_org_from_names(names: list[str]) -> str | None:
 
 
 def extract_resolved_date(changelog: list[dict[str, Any]]) -> datetime.datetime | None:
-    """Return the date when status first changed to one of ``CLOSED_STATUSES``."""
+    """Return when the ticket was last closed.
+
+    That is the latest status change from a status outside ``CLOSED_STATUSES``
+    into one of them. Moves between closed statuses (e.g. an automation that
+    closes resolved tickets weeks later) don't change it, and a reopened and
+    closed again ticket gets the date of its last closing.
+    """
+    resolved = None
     histories = sorted(changelog, key=lambda h: h.get("created") or datetime.datetime.min)
     for hist in histories:
         for item in hist.get("items", []):
             if (
                 item.get("field") == "status"
+                and (item.get("fromString") or "").lower() not in CLOSED_STATUSES
                 and (item.get("toString") or "").lower() in CLOSED_STATUSES
             ):
-                return hist.get("created")
-    return None
+                resolved = hist.get("created")
+    return resolved
 
 
 def extract_first_response_date(comments: list[dict[str, Any]]) -> datetime.datetime | None:
@@ -552,7 +560,15 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     result = issue.copy()
     created = result.get("created")
     updated = result.get("updated")
-    resolved = result.get("resolved") or extract_resolved_date(changelog)
+    # The status history decides, not Jira's resolutiondate: workflows often set
+    # the resolution only when an automation closes a resolved ticket weeks
+    # later. Jira's date is the fallback for tickets without status history. A
+    # ticket that is open again has no resolved date.
+    status = ((result.get("fields") or {}).get("status") or {}).get("name")
+    if status is None or status.lower() in CLOSED_STATUSES:
+        resolved = extract_resolved_date(changelog) or result.get("resolved")
+    else:
+        resolved = None
     result["resolved"] = resolved
 
     result["CreatedWeek"] = cw_string_from_datetime(created)
