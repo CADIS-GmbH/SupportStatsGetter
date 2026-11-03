@@ -44,6 +44,8 @@ The config file is YAML (`.yaml`/`.yml`) or JSON. `config.example.yaml` document
 | `cancelled_statuses` | Statuses that mark a ticket as cancelled (`is_junk`); these tickets are left out of the summary views. Default: `["Cancelled"]`. |
 | `resolution_time_excluded_statuses` | Days that start in one of these statuses do not count towards the adjusted resolution time. Default: `["Closed", "Cancelled", "Resolved", "Waiting for customer", "Pending"]`. |
 | `no_contact_ignore_statuses` | Tickets in these statuses are not counted in the "no contact" KPI (see `no_contact_days`). Default: `["Closed", "Resolved", "Cancelled", "Pending"]`. |
+| `internal_email_domains` | Email domains of your agents, e.g. `["example.com"]`. Comment authors with an address in one of these domains count as internal (see `internal_users` below). Default: none. |
+| `internal_groups` | Jira groups whose members are agents, e.g. `["service-desk-agents"]`. When set, authors count as internal only with an address in `internal_email_domains` / `internal_users` or as a member of one of these groups; otherwise the Jira account type decides for authors without a visible email. Members are read from Jira on every run and stored in `internal_group_members`. Run once with `--recalculate-all` after changing it. Default: none. |
 | `aged_days_short`, `aged_days_long` | Open tickets on Fridays count as aged when open longer than this many days (columns `aged_5_plus` / `aged_30_plus`; the names stay the same). Defaults: `5` and `30`. |
 | `no_contact_days` | Open tickets on Fridays count as "no contact" after more than this many weekdays without contact (column `over5_days_no_contact`). Default: `5`. |
 | `priority_deescalation_ignore_minutes` | A priority raise that is reverted within this many minutes is not counted as an escalation. |
@@ -52,7 +54,7 @@ The config file is YAML (`.yaml`/`.yml`) or JSON. `config.example.yaml` document
 
 Some settings live in database tables so they can be maintained without changing the config. Fill them with any SQLite tool:
 
-- `internal_users` (`pattern`) – regular expressions matched against author email addresses. Matching authors count as agents, which is used to calculate first and last response times.
+- `internal_users` (`pattern`) – regular expressions matched against author email addresses. Matching authors count as agents, which is used to calculate first and last response times. For whole domains, `internal_email_domains` in the config is simpler; both are used.
 - `org_lookup` (`regex`, `primary_org`, `priority`) – maps Jira organization names to a primary organization. When several match, the highest priority wins.
 - `week_reporting` (`calendar_week`, `reporting_month`, `reporting_quarter`) – assigns ISO weeks (`YYYY.WW`) to reporting months and quarters. The summary views only show weeks listed here. Weeks are added automatically for every year from the oldest stored ticket to the current year (weeks 1–5 → month 1, 6–9 → 2, 10–13 → 3, and so on); rows you edit are kept.
 
@@ -130,6 +132,7 @@ a single field change from the issue history:
 - `fieldtype` - Jira field type
 - `from_value` / `to_value` - raw values as provided by the API
 - `from_string` / `to_string` - human readable values
+- `internal_user` - whether the author is an agent (same rules as for comments; automations count as external)
 
 Daily statistics for each ticket are stored in the `jira_calendar` table:
 
@@ -152,6 +155,16 @@ The database contains views that join the tables with the reporting weeks, inclu
 `jira_tickets_reporting`, `jira_calendar_reporting`, `jira_worklogs_reporting` and the
 `weekly_support_summary`, `monthly_support_summary` and `quarterly_support_summary`
 KPI views. All views are written to the Excel export.
+
+`agent_weekly_activity` shows per ISO week and internal user on how many tickets
+they worked: `tickets_total`, split into `tickets_commented`,
+`tickets_status_changed` (status or resolution), `tickets_assignment_changed` and
+`tickets_other_changes` (any other field). A ticket counts once per column, so
+the split columns can add up to more than the total. `comments`,
+`public_comments`, `status_changes`, `assignment_changes` and `other_changes`
+count the actions themselves; one changelog entry that changes several fields of
+the same kind counts once. Changelog entries stored by older versions have no
+internal flag; for those, authors with internal comments count as internal.
 
 ## License
 

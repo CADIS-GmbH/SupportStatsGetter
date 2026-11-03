@@ -21,8 +21,14 @@ import re
 import shutil
 
 # Email patterns of internal agents used to detect response times. The patterns
-# are loaded from the ``internal_users`` table at runtime.
+# are loaded from the ``internal_users`` table at runtime, plus one per domain
+# in ``internal_email_domains`` from the config.
 INTERNAL_EMAIL_PATTERNS: list[Pattern[str]] = []
+# Members of the Jira groups in ``internal_groups`` (account ids and display
+# names). None when no groups are configured: then the Jira account type decides
+# for authors without a matching email address.
+INTERNAL_ACCOUNT_IDS: set[str] | None = None
+INTERNAL_NAMES: set[str] = set()
 # Patterns used to map organization names to a primary organization. Loaded
 # from the ``org_lookup`` table at runtime.
 ORG_PATTERNS: list[tuple[Pattern[str], str, int]] = []
@@ -275,6 +281,10 @@ class Config:
     aged_days_short: int = DEFAULT_AGED_DAYS_SHORT
     aged_days_long: int = DEFAULT_AGED_DAYS_LONG
     no_contact_days: int = DEFAULT_NO_CONTACT_DAYS
+    # email domains of agents, e.g. ["example.com"]; adds to the internal_users table
+    internal_email_domains: list[str] = field(default_factory=list)
+    # Jira groups whose members are agents, e.g. ["service-desk-agents"]
+    internal_groups: list[str] = field(default_factory=list)
 
     @staticmethod
     @log_call
@@ -343,6 +353,10 @@ class Config:
             aged_days_short=int(data.get("aged_days_short", DEFAULT_AGED_DAYS_SHORT)),
             aged_days_long=int(data.get("aged_days_long", DEFAULT_AGED_DAYS_LONG)),
             no_contact_days=int(data.get("no_contact_days", DEFAULT_NO_CONTACT_DAYS)),
+            internal_email_domains=[
+                str(d) for d in as_list("internal_email_domains", [])
+            ],
+            internal_groups=[str(g) for g in as_list("internal_groups", [])],
         )
 
 
@@ -422,21 +436,30 @@ def is_internal_user(author: Mapping[str, Any] | None) -> bool:
     """Return True if the author appears to be an internal user.
 
     The email address is checked first. If present and matching one of the
-    configured internal patterns, the author is considered internal. If the
-    email address is present but does not match any pattern, the author is
-    treated as external. If no email address is available, the Jira
-    ``accountType`` property is inspected. A value of ``customer`` means the
-    author is external, any other value is assumed to be internal.
+    configured internal patterns, the author is considered internal.
+
+    With ``internal_groups`` configured, every other author is internal only
+    when a member of one of those groups: by account id, or by display name for
+    stored records without one.
+
+    Without groups, an email address that matches no pattern means external.
+    If no email address is available, the Jira ``accountType`` property is
+    inspected. A value of ``customer`` means the author is external, any other
+    value is assumed to be internal.
     """
 
     if not author:
         return False
 
     email = author.get("emailAddress")
+    if email and any(pattern.search(email) for pattern in INTERNAL_EMAIL_PATTERNS):
+        return True
+    if INTERNAL_ACCOUNT_IDS is not None:
+        account_id = author.get("accountId")
+        if account_id:
+            return account_id in INTERNAL_ACCOUNT_IDS
+        return author.get("displayName") in INTERNAL_NAMES
     if email:
-        for pattern in INTERNAL_EMAIL_PATTERNS:
-            if pattern.search(email):
-                return True
         return False
 
     account_type = author.get("accountType")
@@ -940,6 +963,7 @@ class DatabaseStore:
             Column("from_string", String),
             Column("to_value", String),
             Column("to_string", String),
+            Column("internal_user", Boolean),
         )
         self.jira_calendar = Table(
             "jira_calendar",
@@ -982,6 +1006,14 @@ class DatabaseStore:
             "internal_users",
             self.meta,
             Column("pattern", String, primary_key=True),
+        )
+        # members of the internal_groups, refreshed from Jira on every run
+        self.internal_group_members = Table(
+            "internal_group_members",
+            self.meta,
+            Column("group_name", String, primary_key=True),
+            Column("account_id", String, primary_key=True),
+            Column("display_name", String),
         )
         self.org_lookup = Table(
             "org_lookup",
@@ -1396,6 +1428,60 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "customer_weekly_summary")
             conn.execute(text(customer_view_sql))
 
+        # per internal user and ISO week: tickets worked on, split by kind of action.
+        # Comments and changelog entries (one per history entry, so a status change
+        # that also sets the resolution counts once). Changelog rows stored before
+        # the internal_user column existed fall back to the internal comment authors.
+        agent_view_sql = """
+            CREATE VIEW agent_weekly_activity AS
+            WITH
+                internal_names AS (
+                    SELECT DISTINCT author FROM jira_comments
+                    WHERE internal_user = 1 AND author IS NOT NULL
+                ),
+                actions AS (
+                    SELECT strftime('%G.%V', created) AS week, author, author_email,
+                           ticket_id, 'comment' AS kind, id AS action_id, public
+                    FROM jira_comments
+                    WHERE internal_user = 1
+                    UNION ALL
+                    SELECT strftime('%G.%V', created), author, author_email, ticket_id,
+                           CASE
+                               WHEN LOWER(field) IN ('status', 'resolution') THEN 'status'
+                               WHEN LOWER(field) = 'assignee' THEN 'assignment'
+                               ELSE 'other'
+                           END,
+                           history_id, NULL
+                    FROM jira_changelog
+                    WHERE COALESCE(
+                        internal_user, author IN (SELECT author FROM internal_names)
+                    ) = 1
+                )
+            SELECT
+                a.week,
+                wr.reporting_month AS month,
+                wr.reporting_quarter AS quarter,
+                a.author AS agent,
+                MAX(a.author_email) AS agent_email,
+                COUNT(DISTINCT a.ticket_id) AS tickets_total,
+                COUNT(DISTINCT CASE WHEN kind = 'comment' THEN ticket_id END) AS tickets_commented,
+                COUNT(DISTINCT CASE WHEN kind = 'status' THEN ticket_id END) AS tickets_status_changed,
+                COUNT(DISTINCT CASE WHEN kind = 'assignment' THEN ticket_id END) AS tickets_assignment_changed,
+                COUNT(DISTINCT CASE WHEN kind = 'other' THEN ticket_id END) AS tickets_other_changes,
+                COUNT(DISTINCT CASE WHEN kind = 'comment' THEN action_id END) AS comments,
+                COUNT(DISTINCT CASE WHEN kind = 'comment' AND public = 1 THEN action_id END) AS public_comments,
+                COUNT(DISTINCT CASE WHEN kind = 'status' THEN action_id END) AS status_changes,
+                COUNT(DISTINCT CASE WHEN kind = 'assignment' THEN action_id END) AS assignment_changes,
+                COUNT(DISTINCT CASE WHEN kind = 'other' THEN action_id END) AS other_changes
+            FROM actions a
+            JOIN week_reporting wr ON wr.calendar_week = a.week
+            GROUP BY a.week, a.author
+            ORDER BY a.week, a.author
+        """
+        with self.engine.begin() as conn:
+            self._drop_view_if_exists(conn, "agent_weekly_activity")
+            conn.execute(text(agent_view_sql))
+
         statuses = sql_status_list(self.no_contact_ignore_statuses)
 
         summary_view_template = """
@@ -1759,6 +1845,12 @@ class DatabaseStore:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_comments ADD COLUMN author_email VARCHAR"))
 
+        cols = [c["name"] for c in inspector.get_columns("jira_changelog")]
+        if "internal_user" not in cols:
+            # older rows stay NULL; agent_weekly_activity falls back to comment authors
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_changelog ADD COLUMN internal_user BOOLEAN"))
+
         cols = [c["name"] for c in inspector.get_columns("jira_worklogs")]
         if "started_week" not in cols:
             with self.engine.begin() as conn:
@@ -1813,6 +1905,54 @@ class DatabaseStore:
         with self.engine.connect() as conn:
             result = conn.execute(select(func.max(self.jira_tickets.c.updated))).scalar()
         return result
+
+    def load_internal_group_members(self, groups: Iterable[str]) -> list[tuple[str, str | None]]:
+        """Stored (account id, display name) of the members of ``groups``."""
+        table = self.internal_group_members
+        with self.engine.connect() as conn:
+            return [
+                (account_id, name)
+                for account_id, name in conn.execute(
+                    select(table.c.account_id, table.c.display_name).where(
+                        table.c.group_name.in_(list(groups))
+                    )
+                )
+            ]
+
+    def replace_internal_group_members(
+        self, group: str, members: Iterable[tuple[str, str | None]]
+    ) -> None:
+        table = self.internal_group_members
+        with self.engine.begin() as conn:
+            conn.execute(table.delete().where(table.c.group_name == group))
+            rows = [
+                {"group_name": group, "account_id": account_id, "display_name": name}
+                for account_id, name in members
+            ]
+            if rows:
+                conn.execute(table.insert(), rows)
+
+    def update_changelog_internal_flags(self, ticket_id: str) -> None:
+        """Re-evaluate the internal flag of a ticket's stored changelog entries."""
+        table = self.jira_changelog
+        with self.engine.begin() as conn:
+            authors = conn.execute(
+                select(table.c.author, table.c.author_email)
+                .where(table.c.ticket_id == ticket_id)
+                .distinct()
+            ).all()
+            for name, email in authors:
+                conn.execute(
+                    table.update()
+                    .where(table.c.ticket_id == ticket_id)
+                    .where(table.c.author.is_(name))
+                    .where(table.c.author_email.is_(email))
+                    .values(
+                        internal_user=is_internal_user(
+                            {"displayName": name, "emailAddress": email}
+                        )
+                    )
+                )
 
     @log_call
     def load_internal_patterns(self) -> list[Pattern[str]]:
@@ -1936,7 +2076,18 @@ class SupportStatsGetter:
             s.lower() for s in config.resolution_time_excluded_statuses
         }
         global INTERNAL_EMAIL_PATTERNS
-        INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
+        INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns() + [
+            # "manus.plus" or "@manus.plus" matches addresses ending in @manus.plus
+            re.compile("@" + re.escape(domain.strip().lstrip("@")) + "$", re.IGNORECASE)
+            for domain in config.internal_email_domains
+            if domain.strip().lstrip("@")
+        ]
+        # stored group members until load_internal_groups() refreshes them from Jira
+        self._set_internal_members(
+            self.store.load_internal_group_members(config.internal_groups)
+            if config.internal_groups
+            else None
+        )
         global ORG_PATTERNS
         ORG_PATTERNS = self.store.load_org_patterns()
         global PRIORITY_POS_MAP
@@ -1957,6 +2108,73 @@ class SupportStatsGetter:
             if key in fields:
                 return fields.get(key)
         return None
+
+    @staticmethod
+    def _set_internal_members(members: list[tuple[str, str | None]] | None) -> None:
+        global INTERNAL_ACCOUNT_IDS, INTERNAL_NAMES
+        if members is None:
+            INTERNAL_ACCOUNT_IDS, INTERNAL_NAMES = None, set()
+        else:
+            INTERNAL_ACCOUNT_IDS = {account_id for account_id, _ in members}
+            INTERNAL_NAMES = {name for _, name in members if name}
+
+    @log_call
+    def load_internal_groups(self) -> None:
+        """Refresh the members of ``internal_groups`` from Jira.
+
+        Keeps the members stored by an earlier run when Jira can't be reached.
+        """
+        if not self.config.internal_groups:
+            return
+        for group in self.config.internal_groups:
+            try:
+                members = self.fetch_group_members(group)
+            except requests.RequestException:
+                logging.exception(
+                    "Could not load the members of group %r; using the stored members", group
+                )
+                continue
+            if not members:
+                logging.warning("Group %r has no members (or does not exist)", group)
+            self.store.replace_internal_group_members(group, members)
+        members = self.store.load_internal_group_members(self.config.internal_groups)
+        logging.info("%d internal users from groups %s", len(members), self.config.internal_groups)
+        self._set_internal_members(members)
+
+    def fetch_group_members(self, group: str) -> list[tuple[str, str | None]]:
+        """(account id, display name) of all user members of a Jira group, inactive ones included.
+
+        App accounts (automations, integrations) are left out: Jira adds them to
+        groups such as service-desk-agents as well.
+        """
+        members: list[tuple[str, str | None]] = []
+        start_at = 0
+        while True:
+            r = requests.get(
+                f"{self.config.jira_base_url}/rest/api/3/group/member",
+                params={
+                    "groupname": group,
+                    "startAt": start_at,
+                    "maxResults": 50,
+                    "includeInactiveUsers": "true",
+                },
+                auth=self._jira_auth(),
+                headers={"Accept": "application/json"},
+                timeout=60,
+            )
+            if r.status_code == 404:
+                return []
+            r.raise_for_status()
+            data = r.json()
+            values = data.get("values", [])
+            members += [
+                (m["accountId"], m.get("displayName"))
+                for m in values
+                if m.get("accountType", "atlassian") == "atlassian"
+            ]
+            if data.get("isLast", True) or not values:
+                return members
+            start_at += len(values)
 
     def _jira_auth(self) -> tuple[str, str] | None:
         if self.config.jira_user and self.config.jira_token:
@@ -2460,14 +2678,21 @@ class SupportStatsGetter:
                 }
                 updated = dict(c)
                 # Preserve stored flag if no email is present to avoid
-                # misclassifying internal comments
+                # misclassifying internal comments; with internal_groups the
+                # display name is enough to decide
                 internal_stored = c.get("internal_user")
-                if internal_stored is not None and not c.get("author_email"):
+                if (
+                    internal_stored is not None
+                    and not c.get("author_email")
+                    and INTERNAL_ACCOUNT_IDS is None
+                ):
                     updated["internal_user"] = internal_stored
                 else:
                     updated["internal_user"] = is_internal_user(author)
                 updated_comments.append(updated)
             self.store.insert_many(self.store.jira_comments, updated_comments)
+            if INTERNAL_ACCOUNT_IDS is not None:
+                self.store.update_changelog_internal_flags(ticket_id)
 
             fields = {
                 "summary": issue_row.get("summary"),
@@ -2858,6 +3083,7 @@ class SupportStatsGetter:
             history_id = hist.get("id")
             author = hist.get("author", {}).get("displayName")
             author_email = hist.get("author", {}).get("emailAddress")
+            internal = is_internal_user(hist.get("author"))
             created = hist.get("created")
             items = hist.get("items", [])
             for idx, item in enumerate(items):
@@ -2875,6 +3101,7 @@ class SupportStatsGetter:
                         "from_string": item.get("fromString"),
                         "to_value": item.get("to"),
                         "to_string": item.get("toString"),
+                        "internal_user": internal,
                 }
             )
         self.store.insert_many(self.store.jira_changelog, records)
@@ -2997,6 +3224,7 @@ if __name__ == "__main__":
     logging.info("Running SupportStatsGetter")
     if cfg.jira_base_url:
         try:
+            getter.load_internal_groups()
             since = getter.latest_update_timestamp()
             if args.start_date and since is None:
                 since = args.start_date

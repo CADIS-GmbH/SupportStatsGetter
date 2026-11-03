@@ -96,6 +96,25 @@ request_type_categories: null
 # category columns.
 request_type_category_default: null
 
+# --- Agents ------------------------------------------------------------------
+
+# Email domains of your agents. Comment authors with an address in one of these
+# domains count as internal, which the first/last response times rely on.
+# Adds to the regex patterns in the internal_users table. Authors without a
+# visible email address are judged by their Jira account type.
+# Default: none.
+internal_email_domains:
+  - example.com
+
+# Jira groups whose members are agents, e.g. the group of your Jira Service
+# Management agent licenses. When set, everyone else without an address in
+# internal_email_domains counts as external, also users with a full Jira account
+# (e.g. colleagues from other departments or customers' Jira users). The members
+# are read from Jira on every run; this needs the "Browse users and groups"
+# permission. Default: none (the Jira account type decides).
+internal_groups:
+  - service-desk-agents
+
 # --- Statuses ----------------------------------------------------------------
 # Status names are matched case-insensitively.
 
