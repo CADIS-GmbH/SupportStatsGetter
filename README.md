@@ -150,3 +150,7 @@ The database contains views that join the tables with the reporting weeks, inclu
 `jira_tickets_reporting`, `jira_calendar_reporting`, `jira_worklogs_reporting` and the
 `weekly_support_summary`, `monthly_support_summary` and `quarterly_support_summary`
 KPI views. All views are written to the Excel export.
+
+## License
+
+Copyright (c) 2024-2026 CADIS GmbH. All rights reserved. See [LICENSE](LICENSE).
