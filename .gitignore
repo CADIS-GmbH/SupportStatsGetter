@@ -13,3 +13,6 @@ SupportStats.xlsx
 .vscode
 /*.xlsx
 CLAUDE.md
+/tests/__pycache__
+config_REF_test.yaml
+/.claude
