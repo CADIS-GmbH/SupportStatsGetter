@@ -38,14 +38,24 @@ folder `dist\SupportStatsGetter` with
 - `SupportStatsGetter.exe` – the program itself, instead of
   `.\.venv\Scripts\python.exe SupportStatsGetter.py`
 - `find_custom_fields.exe` – instead of `.\.venv\Scripts\python.exe find_custom_fields.py`
-- `config.example.yaml` and this guide.
+- `run.bat` – starts `SupportStatsGetter.exe` in its own folder
+- `config.example.yaml` – set up for this folder: the database
+  (`support_stats.sqlite`) and the log stay next to the exe, the Excel reports
+  go to the `reports` subfolder (created by `run.bat`)
+- this guide.
 
-Copy that folder to the other computer and follow the steps from step 3 on,
-writing `.\SupportStatsGetter.exe` where the commands below say
-`.\.venv\Scripts\python.exe SupportStatsGetter.py` (same options). The exe
-finds `config.yaml` in the current folder or next to itself; relative paths in
-the config (e.g. `db_path`) are relative to the current folder, so start it in
-its own folder, or set "Start in" to that folder in the Task Scheduler.
+Copy that folder to the other computer, e.g. `C:\SupportStatsGetter`, and
+start `run.bat`. The first time it creates `config.yaml` and opens it in
+Notepad: fill in the settings as described in step 3 (`find_custom_fields.exe
+config.yaml` shows your custom field IDs), save, and start `run.bat` again.
+Options are passed on, e.g. `run.bat --start-date 2025-01-01` for the first
+download (step 4) or `run.bat --recalculate-all`. For regular runs (step 6),
+schedule `run.bat` itself; it needs no "Start in" folder and only waits for a
+key when something fails.
+
+You can also call `SupportStatsGetter.exe` directly with the same options as
+the script. It finds `config.yaml` in the current folder or next to itself;
+relative paths in the config are relative to the current folder.
 Rebuild the exe after updating the scripts.
 
 ## 3. Create the configuration

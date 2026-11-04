@@ -64,3 +64,18 @@ def test_unknown_option_is_reported(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         Config.load(path)
     assert "log_levle" in caplog.text
+
+
+def test_exe_config_keeps_files_in_the_exe_folder():
+    sys.path.insert(0, str(EXAMPLE.parent / "exe"))
+    from make_exe_config import make_exe_config
+
+    data = yaml.safe_load(make_exe_config(EXAMPLE.read_text(encoding="utf-8")))
+    assert data["db_path"] == "support_stats.sqlite"
+    assert data["log_file"] == "support_stats.log"
+    assert data["output_excel"] == r"reports\SupportStats.xlsx"
+    # every other option is the same as in the example
+    example = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    assert {k: v for k, v in data.items() if k not in ("db_path", "log_file", "output_excel")} == {
+        k: v for k, v in example.items() if k not in ("db_path", "log_file", "output_excel")
+    }
