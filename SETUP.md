@@ -28,6 +28,25 @@ py -m venv .venv
 This creates a private Python environment in `.venv` and installs the
 required packages into it.
 
+### Without Python: the .exe version
+
+On a computer without Python, use the standalone programs instead. On a
+computer *with* the Python setup above, run `build_exe.bat`; it creates the
+folder `dist\SupportStatsGetter` with
+
+- `SupportStatsGetter.exe` – the program itself, instead of
+  `.\.venv\Scripts\python.exe SupportStatsGetter.py`
+- `find_custom_fields.exe` – instead of `.\.venv\Scripts\python.exe find_custom_fields.py`
+- `config.example.yaml` and this guide.
+
+Copy that folder to the other computer and follow the steps from step 3 on,
+writing `.\SupportStatsGetter.exe` where the commands below say
+`.\.venv\Scripts\python.exe SupportStatsGetter.py` (same options). The exe
+finds `config.yaml` in the current folder or next to itself; relative paths in
+the config (e.g. `db_path`) are relative to the current folder, so start it in
+its own folder, or set "Start in" to that folder in the Task Scheduler.
+Rebuild the exe after updating the scripts.
+
 ## 3. Create the configuration
 
 Copy the example and open it in an editor:

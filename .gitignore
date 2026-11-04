@@ -20,3 +20,5 @@ SupportStats.xlsx
 CLAUDE.md
 __pycache__/
 *.zip
+/build/
+/dist/

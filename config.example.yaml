@@ -148,6 +148,13 @@ no_contact_ignore_statuses:
   - Cancelled
   - Pending
 
+# A ticket is not active in a week it spent entirely in these statuses: it is
+# left out of the active ticket counts (ongoing_tickets, open_<category>) for
+# that week. Run once with --recalculate-all after changing the list.
+# Default: none.
+inactive_statuses:
+  - "Waiting for development"
+
 # --- Backlog thresholds ------------------------------------------------------
 # Open tickets on Fridays are counted when they are open longer than these
 # numbers of days, or had no contact for more than no_contact_days weekdays.

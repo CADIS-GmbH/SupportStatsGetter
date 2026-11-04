@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable, Pattern, Mapping, Literal
 import re
 import shutil
+import sys
 
 # Email patterns of internal agents used to detect response times. The patterns
 # are loaded from the ``internal_users`` table at runtime, plus one per domain
@@ -86,8 +87,14 @@ DEFAULT_NO_CONTACT_IGNORE_STATUSES: list[str] = [
     "Pending",
 ]
 
+# Statuses in which a ticket is not active, e.g. waiting for development: a
+# week the ticket spent entirely in these statuses doesn't count as an active
+# week. Config: ``inactive_statuses``.
+DEFAULT_INACTIVE_STATUSES: list[str] = []
+
 # Lower-cased status sets used at runtime, loaded from the config.
 CLOSED_STATUSES: set[str] = {s.lower() for s in DEFAULT_CLOSED_STATUSES}
+INACTIVE_STATUSES: set[str] = {s.lower() for s in DEFAULT_INACTIVE_STATUSES}
 CANCELLED_STATUSES: set[str] = {s.lower() for s in DEFAULT_CANCELLED_STATUSES}
 RESOLUTION_TIME_EXCLUDED_STATUSES: set[str] = {
     s.lower() for s in DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES
@@ -278,6 +285,9 @@ class Config:
     no_contact_ignore_statuses: list[str] = field(
         default_factory=lambda: DEFAULT_NO_CONTACT_IGNORE_STATUSES.copy()
     )
+    inactive_statuses: list[str] = field(
+        default_factory=lambda: DEFAULT_INACTIVE_STATUSES.copy()
+    )
     aged_days_short: int = DEFAULT_AGED_DAYS_SHORT
     aged_days_long: int = DEFAULT_AGED_DAYS_LONG
     no_contact_days: int = DEFAULT_NO_CONTACT_DAYS
@@ -350,6 +360,7 @@ class Config:
             no_contact_ignore_statuses=as_list(
                 "no_contact_ignore_statuses", DEFAULT_NO_CONTACT_IGNORE_STATUSES
             ),
+            inactive_statuses=as_list("inactive_statuses", DEFAULT_INACTIVE_STATUSES),
             aged_days_short=int(data.get("aged_days_short", DEFAULT_AGED_DAYS_SHORT)),
             aged_days_long=int(data.get("aged_days_long", DEFAULT_AGED_DAYS_LONG)),
             no_contact_days=int(data.get("no_contact_days", DEFAULT_NO_CONTACT_DAYS)),
@@ -419,17 +430,59 @@ def cw_string_from_datetime(dt: datetime.datetime | None) -> str | None:
     return f"{dt.isocalendar().year}.{dt.isocalendar().week:02}"
 
 
-def active_weeks(start: datetime.datetime | None, end: datetime.datetime | None) -> str | None:
-    """Return comma separated list of ISO weeks between two dates."""
-    if not start or not end:
-        return None
+def _weeks_between(start: datetime.datetime, end: datetime.datetime) -> set[str]:
     weeks: set[str] = set()
     d = start
     while d <= end:
         weeks.add(cw_string_from_datetime(d))
         d += datetime.timedelta(days=7)
     weeks.add(cw_string_from_datetime(end))
-    return ",".join(sorted(weeks))
+    return weeks
+
+
+def active_weeks(
+    start: datetime.datetime | None,
+    end: datetime.datetime | None,
+    changelog: list[dict[str, Any]] | None = None,
+    current_status: str | None = None,
+) -> str | None:
+    """Return comma separated list of ISO weeks between two dates.
+
+    With ``INACTIVE_STATUSES`` configured and the ``changelog`` given, only
+    weeks in which the ticket spent some time in another status are returned:
+    a week spent entirely in inactive statuses is not an active week.
+    """
+    if not start or not end:
+        return None
+    if not INACTIVE_STATUSES or changelog is None:
+        return ",".join(sorted(_weeks_between(start, end)))
+
+    changes = sorted(
+        (hist["created"], item.get("fromString"), item.get("toString"))
+        for hist in changelog
+        if hist.get("created")
+        for item in hist.get("items", [])
+        if item.get("field") == "status"
+    )
+    # walk the status timeline from start to end; weeks with an active status count
+    status = changes[0][1] if changes else current_status
+    seg_start = start
+    weeks: set[str] = set()
+
+    def add_segment(seg_end: datetime.datetime) -> None:
+        if seg_end > seg_start and (status or "").lower() not in INACTIVE_STATUSES:
+            # the end itself belongs to the next status
+            weeks.update(_weeks_between(seg_start, seg_end - datetime.timedelta(microseconds=1)))
+
+    for changed, _, to_status in changes:
+        if changed >= end:
+            break
+        if changed > seg_start:
+            add_segment(changed)
+            seg_start = changed
+        status = to_status
+    add_segment(end)
+    return ",".join(sorted(weeks)) or None
 
 
 def is_internal_user(author: Mapping[str, Any] | None) -> bool:
@@ -573,7 +626,7 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
 
     result["CreatedWeek"] = cw_string_from_datetime(created)
     result["ResolvedWeek"] = cw_string_from_datetime(resolved)
-    result["ActiveWeeks"] = active_weeks(created, resolved or updated)
+    result["ActiveWeeks"] = active_weeks(created, resolved or updated, changelog, status)
     fields = result.get("fields", {})
     result["FirstResponseDate"] = extract_first_response_date(comments)
     result["LastResponseDate"] = extract_last_response_date(comments)
@@ -2091,6 +2144,8 @@ class SupportStatsGetter:
         RESOLUTION_TIME_EXCLUDED_STATUSES = {
             s.lower() for s in config.resolution_time_excluded_statuses
         }
+        global INACTIVE_STATUSES
+        INACTIVE_STATUSES = {s.lower() for s in config.inactive_statuses}
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns() + [
             # "manus.plus" or "@manus.plus" matches addresses ending in @manus.plus
@@ -3220,9 +3275,18 @@ if __name__ == "__main__":
     if args.config:
         cfg_path = Path(args.config)
     else:
-        # older installations still use config.json
+        # older installations still use config.json; the built .exe also looks
+        # next to itself, e.g. when started from another folder
+        folders = [Path()]
+        if getattr(sys, "frozen", False):
+            folders.append(Path(sys.executable).parent)
         cfg_path = next(
-            (p for p in (Path("config.yaml"), Path("config.json")) if p.exists()),
+            (
+                folder / name
+                for folder in folders
+                for name in ("config.yaml", "config.json")
+                if (folder / name).exists()
+            ),
             Path("config.yaml"),
         )
     if not cfg_path.exists():
