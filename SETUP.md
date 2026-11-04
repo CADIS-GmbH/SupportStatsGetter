@@ -5,7 +5,8 @@ description of all settings, tables and views see [README.md](README.md).
 
 ## 1. Prerequisites
 
-- **Python 3.13** (`RUN.bat` requires it; newer versions lack prebuilt packages for some dependencies) – download from <https://www.python.org/downloads/>.
+- **Python 3.13** (newer versions lack prebuilt packages for some dependencies) – download from <https://www.python.org/downloads/>.
+  Not needed on computers that run the .exe version (see step 2).
   During installation tick *"Add python.exe to PATH"*.
 - **A Jira Service Management Cloud site** and a Jira user that can see all
   tickets of the service desk project, including internal comments (an agent
@@ -21,7 +22,7 @@ Unpack the zip, e.g. to `C:\SupportStatsGetter`, then open PowerShell:
 
 ```powershell
 cd C:\SupportStatsGetter
-py -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
