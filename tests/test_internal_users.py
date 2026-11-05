@@ -58,7 +58,7 @@ def test_internal_groups_decide_without_matching_email(tmp_path, monkeypatch):
                     {"accountId": "app1", "displayName": "Automation for Jira",
                      "accountType": "app"}], "isLast": True},
     ]
-    monkeypatch.setattr(SupportStatsGetter_module.requests, "get",
+    monkeypatch.setattr(SupportStatsGetter_module.requests.Session, "get",
                         lambda *a, **kw: FakeResponse(pages.pop(0)))
     getter = SupportStatsGetter(group_config(tmp_path))
     getter.load_internal_groups()
@@ -79,7 +79,7 @@ def test_internal_groups_decide_without_matching_email(tmp_path, monkeypatch):
     def fail(*a, **kw):
         raise requests.ConnectionError("offline")
 
-    monkeypatch.setattr(SupportStatsGetter_module.requests, "get", fail)
+    monkeypatch.setattr(SupportStatsGetter_module.requests.Session, "get", fail)
     getter = SupportStatsGetter(group_config(tmp_path))
     getter.load_internal_groups()
     assert is_internal_user({"accountId": "a1"})

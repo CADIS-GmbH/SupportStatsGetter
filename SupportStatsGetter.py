@@ -183,7 +183,19 @@ DASHBOARD_TOP_CUSTOMERS = 15
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
 JIRA_PULL_OVERLAP_MIN = 5 #60*24*7  #5
 
+# Jira requests: (connect, read) timeout in seconds, so a dead connection fails
+# fast instead of hanging until the operating system drops it
+JIRA_TIMEOUT = (15, 120)
+# Retries per Jira request on dropped connections, timeouts, 429 and 5xx
+# (waits 2, 4, 8, 16, ... seconds; honours Retry-After)
+JIRA_RETRIES = 6
+# Tickets are saved to the database after every this many processed tickets,
+# so an aborted run resumes from the last saved batch
+TICKET_BATCH_SIZE = 50
+
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import dateutil.parser
 import pytz
 import yaml
@@ -2118,12 +2130,28 @@ class DatabaseStore:
         )
 
 
+def jira_session() -> requests.Session:
+    """HTTP session that retries dropped connections, timeouts, 429 and 5xx."""
+    retry = Retry(
+        total=JIRA_RETRIES,
+        backoff_factor=2,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=None,  # the search POST only reads, retrying it is safe
+        raise_on_status=False,  # the caller's raise_for_status reports the last status
+    )
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.mount("http://", HTTPAdapter(max_retries=retry))
+    return session
+
+
 class SupportStatsGetter:
     """Retrieve Jira ticket data and store it in the configured database."""
 
     @log_call
     def __init__(self, config: Config):
         self.config = config
+        self.http = jira_session()
         engine = create_engine(f"sqlite+pysqlite:///{config.db_path}")
         self.store = DatabaseStore(
             engine,
@@ -2221,17 +2249,14 @@ class SupportStatsGetter:
         members: list[tuple[str, str | None]] = []
         start_at = 0
         while True:
-            r = requests.get(
+            r = self._jira_get(
                 f"{self.config.jira_base_url}/rest/api/3/group/member",
-                params={
+                {
                     "groupname": group,
                     "startAt": start_at,
                     "maxResults": 50,
                     "includeInactiveUsers": "true",
                 },
-                auth=self._jira_auth(),
-                headers={"Accept": "application/json"},
-                timeout=60,
             )
             if r.status_code == 404:
                 return []
@@ -2251,6 +2276,24 @@ class SupportStatsGetter:
         if self.config.jira_user and self.config.jira_token:
             return (self.config.jira_user, self.config.jira_token)
         return None
+
+    def _jira_get(self, url: str, params: dict[str, Any]) -> requests.Response:
+        return self.http.get(
+            url,
+            params=params,
+            auth=self._jira_auth(),
+            headers={"Accept": "application/json"},
+            timeout=JIRA_TIMEOUT,
+        )
+
+    def _jira_post(self, url: str, payload: dict[str, Any]) -> requests.Response:
+        return self.http.post(
+            url,
+            json=payload,
+            auth=self._jira_auth(),
+            headers={"Accept": "application/json"},
+            timeout=JIRA_TIMEOUT,
+        )
 
     @log_call
     def latest_update_timestamp(self) -> datetime.datetime | None:
@@ -2852,12 +2895,7 @@ class SupportStatsGetter:
                 "maxResults": max_results,
                 "expand": "renderedBody",
             }
-            r = requests.get(
-                url,
-                params=params,
-                auth=self._jira_auth(),
-                headers={"Accept": "application/json"},
-            )
+            r = self._jira_get(url, params)
             r.raise_for_status()
             data = r.json()
             comments = data.get("comments", [])
@@ -2887,12 +2925,7 @@ class SupportStatsGetter:
 
         while True:
             params = {"startAt": start_at, "maxResults": max_results}
-            r = requests.get(
-                url,
-                params=params,
-                auth=self._jira_auth(),
-                headers={"Accept": "application/json"},
-            )
+            r = self._jira_get(url, params)
             r.raise_for_status()
             data = r.json()
             logs = data.get("worklogs", [])
@@ -2922,12 +2955,7 @@ class SupportStatsGetter:
 
         while True:
             params = {"startAt": start_at, "maxResults": max_results}
-            r = requests.get(
-                url,
-                params=params,
-                auth=self._jira_auth(),
-                headers={"Accept": "application/json"},
-            )
+            r = self._jira_get(url, params)
             r.raise_for_status()
             data = r.json()
             histories = data.get("values") or data.get("histories", [])
@@ -2948,18 +2976,20 @@ class SupportStatsGetter:
             logging.getLogger(__name__).error("jira_base_url not configured")
             raise ValueError("jira_base_url not configured")
 
-        base = self.config.base_jql or ""
         parts = []
-        if base:
-            parts.append(base)
-        extra = jql.strip()
-        if extra:
-            parts.append(f"({extra})")
+        for clause in (self.config.base_jql or "", jql):
+            # an ORDER BY can't be followed by AND; the order is set below
+            clause = re.split(r"\border\s+by\b", clause, flags=re.IGNORECASE)[0].strip()
+            if clause:
+                parts.append(f"({clause})")
         if updated_since:
             get_since = updated_since - datetime.timedelta(minutes=JIRA_PULL_OVERLAP_MIN)
             ts = get_since.astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M")
             parts.append(f"updated >= \"{ts}\"")
-        final_jql = " AND ".join(parts)
+        # Oldest change first: the run saves tickets in batches, and the next
+        # run continues from the newest saved "updated", so an aborted run
+        # must not have saved newer tickets before older ones
+        final_jql = " AND ".join(parts) + " ORDER BY updated ASC"
 
         url = f"{self.config.jira_base_url}/rest/api/3/search/jql"
         next_page_token: str | None = None
@@ -2975,12 +3005,7 @@ class SupportStatsGetter:
             if next_page_token:
                 payload["nextPageToken"] = next_page_token
             logging.getLogger(__name__).info(f"POST {url} json={payload}")
-            r = requests.post(
-                url,
-                json=payload,
-                auth=self._jira_auth(),
-                headers={"Accept": "application/json"},
-            )
+            r = self._jira_post(url, payload)
             r.raise_for_status()
             data = r.json()
 
@@ -3225,6 +3250,91 @@ class SupportStatsGetter:
         return ts if ts.tzinfo else pytz.utc.localize(ts)
 
 
+def sync_jira_tickets(
+    getter: SupportStatsGetter,
+    updated_since: datetime.datetime | None,
+    recalculate_all: bool = False,
+) -> None:
+    """Fetch the tickets updated since ``updated_since`` and store them with their details.
+
+    Tickets are processed oldest change first and saved every
+    ``TICKET_BATCH_SIZE`` tickets, so a run that stops halfway resumes after
+    the last saved ticket.
+    """
+    logging.info("Fetching Jira tickets")
+    raw_issues = getter.fetch_jira_tickets(updated_since=updated_since)
+    logging.info("Retrieved %d tickets from Jira", len(raw_issues))
+    comments_total = 0
+    worklogs_total = 0
+    changelog_total = 0
+    calendar_total = 0
+    stored_ids: list[str] = []
+    batch: list[dict[str, Any]] = []
+    total_issues = len(raw_issues)
+
+    def save_batch() -> None:
+        """Save the processed tickets; the next run resumes after them."""
+        if not batch:
+            return
+        getter.store_jira_tickets(batch)
+        ids = [issue["id"] for issue in batch]
+        getter.recalculate_tickets(ids)
+        stored_ids.extend(ids)
+        batch.clear()
+        logging.info("Saved %d of %d tickets", len(stored_ids), total_issues)
+
+    try:
+        for idx, issue in enumerate(raw_issues, 1):
+            logging.info(
+                "Processing ticket %s (%d/%d)", issue.get("key"), idx, total_issues
+            )
+            comments = getter.fetch_jira_comments(issue["id"])
+            worklogs = getter.fetch_jira_worklogs(issue["id"])
+            changelog = getter.fetch_jira_changelog(issue["id"])
+
+            processed_issue = calculate_kpi_fields(issue, comments, changelog)
+            batch.append(processed_issue)
+
+            getter.store_jira_comments(issue["id"], issue.get("key"), comments)
+            getter.store_jira_worklogs(issue["id"], worklogs)
+            getter.store_jira_changelog(issue["id"], changelog)
+
+            calendar_rows = make_jira_ticket_calendar(
+                issue,
+                comments,
+                worklogs,
+                changelog,
+                getter.config.custom_fields.get("request_type"),
+                getter.config.priority_deescalation_ignore_minutes,
+            )
+            getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
+            calendar_total += len(calendar_rows)
+
+            comments_total += len(comments)
+            worklogs_total += len(worklogs)
+            for hist in changelog:
+                changelog_total += len(hist.get("items", []))
+
+            if idx % 10 == 0 or idx == total_issues:
+                logging.info("Processed %d of %d tickets", idx, total_issues)
+
+            if len(batch) >= TICKET_BATCH_SIZE:
+                save_batch()
+    finally:
+        # also after an error: the tickets processed so far are complete
+        try:
+            save_batch()
+        except Exception:  # noqa: BLE001
+            logging.exception("Failed to save the last batch of tickets")
+
+    if recalculate_all:
+        logging.info("Recalculating statistics for all tickets")
+        getter.recalculate_all()
+    logging.info(
+        f"Stored {len(stored_ids)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs, {changelog_total} changelog items and {calendar_total} calendar rows in {getter.config.db_path}"
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Collect Jira ticket statistics")
     parser.add_argument(
@@ -3318,60 +3428,7 @@ if __name__ == "__main__":
                     "fetching updates since %s",
                     since,
                 )
-            logging.info("Fetching Jira tickets")
-            raw_issues = getter.fetch_jira_tickets(updated_since=since)
-            logging.info("Retrieved %d tickets from Jira", len(raw_issues))
-            comments_total = 0
-            worklogs_total = 0
-            changelog_total = 0
-            calendar_total = 0
-            processed: list[dict[str, Any]] = []
-            total_issues = len(raw_issues)
-            for idx, issue in enumerate(raw_issues, 1):
-                logging.info(
-                    "Processing ticket %s (%d/%d)", issue.get("key"), idx, total_issues
-                )
-                comments = getter.fetch_jira_comments(issue["id"])
-                worklogs = getter.fetch_jira_worklogs(issue["id"])
-                changelog = getter.fetch_jira_changelog(issue["id"])
-
-                processed_issue = calculate_kpi_fields(issue, comments, changelog)
-                processed.append(processed_issue)
-
-                getter.store_jira_comments(issue["id"], issue.get("key"), comments)
-                getter.store_jira_worklogs(issue["id"], worklogs)
-                getter.store_jira_changelog(issue["id"], changelog)
-
-                calendar_rows = make_jira_ticket_calendar(
-                    issue,
-                    comments,
-                    worklogs,
-                    changelog,
-                    getter.config.custom_fields.get("request_type"),
-                    getter.config.priority_deescalation_ignore_minutes,
-                )
-                getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
-                calendar_total += len(calendar_rows)
-
-                comments_total += len(comments)
-                worklogs_total += len(worklogs)
-                for hist in changelog:
-                    changelog_total += len(hist.get("items", []))
-
-                if idx % 10 == 0 or idx == total_issues:
-                    logging.info("Processed %d of %d tickets", idx, total_issues)
-
-            logging.info("Saving tickets to database")
-            getter.store_jira_tickets(processed)
-            if args.recalculate_all:
-                logging.info("Recalculating statistics for all tickets")
-                getter.recalculate_all()
-            else:
-                logging.info("Recalculating statistics for new tickets")
-                getter.recalculate_tickets([issue["id"] for issue in processed])
-            logging.info(
-                f"Stored {len(processed)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs, {changelog_total} changelog items and {calendar_total} calendar rows in {cfg.db_path}"
-            )
+            sync_jira_tickets(getter, since, args.recalculate_all)
         except Exception:  # noqa: BLE001
             logging.exception("Failed to fetch or store Jira data")
     else:

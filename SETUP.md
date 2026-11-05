@@ -122,6 +122,11 @@ date are downloaded:
 The start date only applies to a new, empty database. Later runs fetch the
 updates since the last run as usual, so the option can stay in a batch file.
 
+The first run can take hours. Tickets are processed oldest change first and
+saved every 50 tickets. Dropped connections and Jira server errors are retried
+a few times. If the run still stops, start it again with the same command: it
+continues after the last saved ticket instead of starting over.
+
 ## 5. Fill the lookup tables
 
 Some settings are stored in the database, which exists after the first run.
