@@ -13,6 +13,7 @@ REM Works from the Task Scheduler as well (no prompts unless something fails).
 cd /d "%~dp0"
 set "EXE=%~dp0SupportStatsGetter.exe"
 set "RETRIED="
+echo Starting SupportStatsGetter - the program needs a few seconds to start...
 
 if not exist config.yaml (
   copy /y config.example.yaml config.yaml >nul
@@ -28,6 +29,8 @@ if not errorlevel 1 (
 
 REM --- Jira credentials -------------------------------------------------------
 :check_credentials
+REM both saved for the Windows user: nothing to ask, save a program start
+if defined SUPPORTSTATS_JIRA_USER if defined SUPPORTSTATS_JIRA_TOKEN goto :run
 call :missing_credentials || goto :error
 if "%MISSING%"=="0" goto :run
 echo Your Jira login is not set up for this Windows user yet. It is saved in
