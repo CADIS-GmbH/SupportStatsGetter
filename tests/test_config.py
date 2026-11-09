@@ -4,6 +4,7 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -44,6 +45,13 @@ def test_yaml_and_json_give_same_config(tmp_path):
     assert Config.load(yaml_path).db_path == Path("C:\\Stats\\support.sqlite")
 
 
+@pytest.fixture(autouse=True)
+def no_credentials_in_environment(monkeypatch):
+    # the tests mustn't see the credentials saved for the Windows user
+    for name in ("SUPPORTSTATS_JIRA_USER", "SUPPORTSTATS_JIRA_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_empty_yaml_uses_defaults(tmp_path):
     path = tmp_path / "config.yml"
     path.write_text("# nothing set\n", encoding="utf-8")
@@ -74,8 +82,103 @@ def test_exe_config_keeps_files_in_the_exe_folder():
     assert data["db_path"] == "support_stats.sqlite"
     assert data["log_file"] == "support_stats.log"
     assert data["output_excel"] == r"reports\SupportStats.xlsx"
+    # run.bat asks for the credentials and stores them in environment variables
+    assert data["jira_user"] is None and data["jira_token"] is None
     # every other option is the same as in the example
     example = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
-    assert {k: v for k, v in data.items() if k not in ("db_path", "log_file", "output_excel")} == {
-        k: v for k, v in example.items() if k not in ("db_path", "log_file", "output_excel")
+    changed = ("db_path", "log_file", "output_excel", "jira_user", "jira_token")
+    assert {k: v for k, v in data.items() if k not in changed} == {
+        k: v for k, v in example.items() if k not in changed
     }
+
+
+def test_credentials_fall_back_to_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPPORTSTATS_JIRA_USER", "env@example.com")
+    monkeypatch.setenv("SUPPORTSTATS_JIRA_TOKEN", "env-token")
+    path = tmp_path / "config.yaml"
+    path.write_text("jira_user: null\n", encoding="utf-8")
+    config = Config.load(path)
+    assert (config.jira_user, config.jira_token) == ("env@example.com", "env-token")
+
+
+def test_config_credentials_win_over_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPPORTSTATS_JIRA_USER", "env@example.com")
+    monkeypatch.setenv("SUPPORTSTATS_JIRA_TOKEN", "env-token")
+    path = tmp_path / "config.yaml"
+    path.write_text("jira_user: me@example.com\njira_token: file-token\n", encoding="utf-8")
+    config = Config.load(path)
+    assert (config.jira_user, config.jira_token) == ("me@example.com", "file-token")
+
+
+def test_missing_credentials_are_reported(tmp_path, monkeypatch, caplog):
+    monkeypatch.delenv("SUPPORTSTATS_JIRA_USER", raising=False)
+    monkeypatch.delenv("SUPPORTSTATS_JIRA_TOKEN", raising=False)
+    path = tmp_path / "config.yaml"
+    path.write_text("jira_token: ''\n", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        config = Config.load(path)
+    assert config.jira_token is None
+    assert "SUPPORTSTATS_JIRA_TOKEN" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "config, env, code",
+    [
+        ("jira_user: me@example.com\njira_token: t\n", {}, 0),
+        ("jira_user: null\njira_token: null\n", {}, 24),
+        ("jira_user: me@example.com\njira_token: null\n", {}, 16),
+        ("jira_user: null\njira_token: t\n", {}, 8),
+        (
+            "jira_user: null\njira_token: null\n",
+            {"SUPPORTSTATS_JIRA_USER": "u", "SUPPORTSTATS_JIRA_TOKEN": "t"},
+            0,
+        ),
+    ],
+)
+def test_missing_credentials_exit_code(tmp_path, config, env, code):
+    import os
+    import subprocess
+
+    path = tmp_path / "config.yaml"
+    path.write_text(config, encoding="utf-8")
+    environ = {
+        k: v for k, v in os.environ.items() if not k.startswith("SUPPORTSTATS_")
+    } | env
+    result = subprocess.run(
+        [sys.executable, str(EXAMPLE.parent / "SupportStatsGetter.py"),
+         "-c", str(path), "--missing-credentials"],
+        env=environ, capture_output=True, cwd=tmp_path,
+    )
+    assert result.returncode == code
+
+
+def run_script(tmp_path, config):
+    import os
+    import subprocess
+
+    path = tmp_path / "config.yaml"
+    path.write_text(config, encoding="utf-8")
+    environ = {k: v for k, v in os.environ.items() if not k.startswith("SUPPORTSTATS_")}
+    return subprocess.run(
+        [sys.executable, str(EXAMPLE.parent / "SupportStatsGetter.py"), "-c", str(path)],
+        env=environ, capture_output=True, text=True, cwd=tmp_path,
+    )
+
+
+def test_missing_data_folder_gives_clear_error(tmp_path):
+    result = run_script(
+        tmp_path,
+        "db_path: '..\\missing_data\\db.sqlite'\n"
+        "output_excel: 'missing_reports\\out.xlsx'\n",
+    )
+    assert result.returncode == 1
+    assert "The folder for db_path does not exist" in result.stderr
+    assert str((tmp_path.parent / "missing_data").resolve()) in result.stderr
+    assert "The folder for output_excel does not exist" in result.stderr
+    assert not (tmp_path.parent / "missing_data").exists()
+
+
+def test_missing_log_folder_gives_clear_error(tmp_path):
+    result = run_script(tmp_path, "log_file: 'missing_logs/run.log'\n")
+    assert result.returncode == 1
+    assert "The folder for log_file does not exist" in result.stderr

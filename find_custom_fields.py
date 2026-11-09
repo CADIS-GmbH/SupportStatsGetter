@@ -2,9 +2,12 @@ r"""Look up the Jira custom field IDs this tool needs and test the connection.
 
 Usage:  .venv\Scripts\python.exe find_custom_fields.py [config.yaml]
 
-Reads jira_base_url / jira_user / jira_token from the config, checks the login
+Reads jira_base_url / jira_user / jira_token from the config (empty user or
+token: the environment variables SUPPORTSTATS_JIRA_USER /
+SUPPORTSTATS_JIRA_TOKEN), checks the login
 and the base_jql, and prints a ready-to-paste custom_fields block.
 """
+import os
 import sys
 
 import requests
@@ -31,9 +34,16 @@ def main() -> int:
     with open(path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     base = (cfg.get("jira_base_url") or "").rstrip("/")
-    auth = (cfg.get("jira_user") or "", cfg.get("jira_token") or "")
+    auth = (
+        cfg.get("jira_user") or os.environ.get("SUPPORTSTATS_JIRA_USER") or "",
+        cfg.get("jira_token") or os.environ.get("SUPPORTSTATS_JIRA_TOKEN") or "",
+    )
     if not base or "your-site" in base or "<" in auth[1]:
-        print("Fill in jira_base_url, jira_user and jira_token in", path, "first.")
+        print(
+            "Fill in jira_base_url in", path, "and jira_user / jira_token there or "
+            "in the environment variables SUPPORTSTATS_JIRA_USER / "
+            "SUPPORTSTATS_JIRA_TOKEN first."
+        )
         return 1
 
     me = requests.get(f"{base}/rest/api/3/myself", auth=auth, timeout=30)

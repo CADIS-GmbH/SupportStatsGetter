@@ -28,7 +28,7 @@ The config file is YAML (`.yaml`/`.yml`) or JSON. `config.example.yaml` document
 
 | Key | Description |
 | --- | --- |
-| `jira_base_url`, `jira_user`, `jira_token` | Jira Cloud URL and API credentials. |
+| `jira_base_url`, `jira_user`, `jira_token` | Jira Cloud URL and API credentials. Leave `jira_user` / `jira_token` empty to read them from the environment variables `SUPPORTSTATS_JIRA_USER` / `SUPPORTSTATS_JIRA_TOKEN` (a value in the config wins). |
 | `db_path` | Path of the SQLite database. |
 | `base_jql` | JQL that limits which tickets are fetched, e.g. `project = DEMO`. |
 | `log_level`, `log_file` | Logging settings. |
@@ -37,13 +37,15 @@ The config file is YAML (`.yaml`/`.yml`) or JSON. `config.example.yaml` document
 | `custom_fields` | Maps logical field names to the Jira custom field IDs of your instance. Supported names: `request_type`, `deployment_type`, `organizations`, `satisfaction`, `satisfaction_ts`, `work_category`, `sentiment`, `request_participants`, `resolution`. |
 | `non_support_request_types` | Request types that are excluded from the support KPIs in the summary views. Default: none. |
 | `support_issue_types` | Issue types counted in the summary views (case-insensitive). Default: `["Support"]`. An empty list counts all issue types. |
-| `request_type_categories` | Groups tickets into categories for the summary views. Each category has a list of patterns; the first category with a matching pattern wins. A pattern is either a SQL `LIKE` pattern (`%` = any text, case-insensitive) matched against the request type, or a mapping of `issue_type` and/or `request_type` `LIKE` patterns that must all match, e.g. `{issue_type: Incident, request_type: "%Hardware%"}`. The summary views get an `open_<category>` and a `closed_<category>` column per category. Default (`null`): one category per issue type in `support_issue_types`, or per stored issue type when that list is empty. `{}` gives no categories. |
+| `request_type_categories` | Groups tickets into categories for the summary views. Each category has a list of patterns; the first category with a matching pattern wins. A pattern is either a SQL `LIKE` pattern (`%` = any text, case-insensitive) matched against the request type, or a mapping of `issue_type`, `request_type` and/or `label` patterns that must all match, e.g. `{issue_type: Incident, request_type: "%Hardware%"}`. `label` matches when any of the ticket's current labels contains the text (case-insensitive, no commas). Instead of the category mapping you can give a list of rules, each a pattern mapping with a `category`, e.g. `[{category: HW, issue_type: Incident, label: hardware}, {category: DIS, label: lobster}, {category: HW, request_type: "%Hardware%"}]`: the rules are tried top-down and a category can appear in several rules. The summary views get an `open_<category>` and a `closed_<category>` column per category. Default (`null`): one category per issue type in `support_issue_types`, or per stored issue type when that list is empty. `{}` gives no categories. |
 | `request_type_category_default` | Category for tickets that match no pattern. Default: `null` (no category). Set to `null` together with an empty `request_type_categories` to drop the category columns. |
 | `priority_positions` | Maps Jira priority names to a numeric position. Positions above `0` count as high priority, and a raise to a position above `0` counts as an escalation. Unknown priorities get `0`. Defaults to the standard Jira priorities (see `config.example.yaml`). |
 | `closed_statuses` | Statuses in which a ticket counts as closed: sets the resolved date and stops the open-day count, and closed tickets are left out of the open ticket counts. The resolved date is the last change from another status into one of these; moving between them (e.g. an automation closing resolved tickets) doesn't change it, and reopened tickets have none until they are closed again. Default: `["Resolved", "Closed", "Cancelled"]`. |
 | `cancelled_statuses` | Statuses that mark a ticket as cancelled (`is_junk`); these tickets are left out of the summary views. Default: `["Cancelled"]`. |
 | `resolution_time_excluded_statuses` | Days that start in one of these statuses do not count towards the adjusted resolution time. Default: `["Closed", "Cancelled", "Resolved", "Waiting for customer", "Pending"]`. |
 | `inactive_statuses` | A ticket is not active in a week it spent entirely in these statuses (e.g. `"Waiting for development"`): that week is left out of its `active_weeks` and of the active ticket counts (`ongoing_tickets`, `open_<category>`). A week with any time in another status still counts. Run once with `--recalculate-all` after changing the list. Default: none. |
+| `assignee_groups` | Jira labels that mark the team a ticket is assigned to (e.g. `["1stLevel", "2ndLevel"]`), in priority order: with several of them on a ticket the first in the list wins. Labels match case-insensitively. The ticket calendar stores the group at the start and end of each day. Run once with `--recalculate-all` after changing the list. Default: none (no groups). |
+| `assignee_group_default` | Group for tickets with none of the `assignee_groups` labels, e.g. `"1stLevel"`. Default: `null` (no group). |
 | `no_contact_ignore_statuses` | Tickets in these statuses are not counted in the "no contact" KPI (see `no_contact_days`). Default: `["Closed", "Resolved", "Cancelled", "Pending"]`. |
 | `internal_email_domains` | Email domains of your agents, e.g. `["example.com"]`. Comment authors with an address in one of these domains count as internal (see `internal_users` below). Default: none. |
 | `internal_groups` | Jira groups whose members are agents, e.g. `["service-desk-agents"]`. When set, authors count as internal only with an address in `internal_email_domains` / `internal_users` or as a member of one of these groups; otherwise the Jira account type decides for authors without a visible email. Members are read from Jira on every run and stored in `internal_group_members`. Run once with `--recalculate-all` after changing it. Default: none. |
@@ -90,6 +92,17 @@ The dashboard is built from formulas on the `weekly_support_summary`,
 tables or a data refresh. Its helper cells are on the hidden `dashboard_calc`
 sheet. Empty values (e.g. no first reply in a week) show as `#N/A` so the line
 charts leave a gap instead of dropping to 0.
+
+The `priority_tickets` sheet, right after the dashboard, lists the tickets
+behind the *High / critical* and *Priority escalated* KPIs to follow up on: one
+row per ticket and ISO week in which it had a high priority (`high_priority`)
+or was escalated (`escalated`, with the day in `escalated_on`), newest week
+first. It has the reporting `month` and `quarter`, the customer, request type
+(category), the highest priority in that week and the ticket's current
+priority, status and assignee. The ticket keys link to Jira, and the header row
+has filters, e.g. to show one week or only escalations. Summing `high_priority`
+or `escalated` for a week gives that week's KPI value; a month or quarter
+counts each ticket once, even when it is listed in several of its weeks.
 
 ## Database tables
 
@@ -143,6 +156,7 @@ Daily statistics for each ticket are stored in the `jira_calendar` table:
 - `comments` / `public_comments` - counts of comments on that day
 - `start_assigned_user` / `end_assigned_user` - assigned user at start and end of the day
 - `start_assigned_user_email` / `end_assigned_user_email` - email addresses of the assigned users
+- `start_assigned_group` / `end_assigned_group` - assignee group (see `assignee_groups`) at start and end of the day
 - `start_status` / `end_status` - status at the start and end of the day
 - `start_priority_txt` / `end_priority_txt` and `start_priority_pos` / `end_priority_pos` - priority at start and end of the day
 - `did_escalate_priority` - whether the priority was raised that day

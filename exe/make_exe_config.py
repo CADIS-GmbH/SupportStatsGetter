@@ -11,6 +11,9 @@ import sys
 from pathlib import Path
 
 EXE_PATHS = {
+    # run.bat asks for the credentials and keeps them in environment variables
+    "jira_user": "null",
+    "jira_token": "null",
     "db_path": r"'support_stats.sqlite'",
     "log_file": r"'support_stats.log'",
     "output_excel": r"'reports\SupportStats.xlsx'",

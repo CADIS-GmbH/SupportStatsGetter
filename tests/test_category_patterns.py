@@ -131,3 +131,112 @@ def test_unknown_pattern_key_is_rejected(tmp_path):
     )
     with pytest.raises(ValueError, match="issuetype"):
         Config.load(path)
+
+
+def make_label_getter(tmp_path, categories, default="Other"):
+    config = Config(
+        db_path=tmp_path / "test.db",
+        support_issue_types=[],
+        request_type_categories=categories,
+        request_type_category_default=default,
+    )
+    getter = SupportStatsGetter(config)
+    day = datetime.datetime(2025, 3, 7)
+    tickets = [
+        ("T-hw-lobster", "Incident", "Hardware broken", "2ndLevel,DIS-Lobster"),
+        ("T-sw-lobster", "Support", "Software question", "dis-lobster"),
+        ("T-hw", "Support", "Hardware order", "1stLevel"),
+        ("T-none", "Support", "Software license", None),
+    ]
+    getter.store.insert_many(
+        getter.store.jira_tickets,
+        [
+            {
+                "id": ticket_id,
+                "key": ticket_id,
+                "status": "Open",
+                "created": day,
+                "updated": day,
+                "created_week": "2025.10",
+                "active_weeks": "2025.10",
+                "issuetype": issuetype,
+                "request_type": request_type,
+                "labels": labels,
+            }
+            for ticket_id, issuetype, request_type, labels in tickets
+        ],
+    )
+    getter.store._create_views()
+    return getter
+
+
+def test_label_pattern_matches_any_label_containing_the_text(tmp_path):
+    getter = make_label_getter(tmp_path, {"DIS": [{"label": "lobster"}]})
+    assert categories_by_ticket(getter) == {
+        "T-hw-lobster": "DIS",
+        "T-sw-lobster": "DIS",
+        "T-hw": "Other",
+        "T-none": "Other",
+    }
+
+
+def test_label_pattern_is_and_connected_with_the_others(tmp_path):
+    getter = make_label_getter(
+        tmp_path, {"DIS HW": [{"label": "Lobster", "request_type": "%Hardware%"}]}
+    )
+    assert categories_by_ticket(getter)["T-hw-lobster"] == "DIS HW"
+    assert categories_by_ticket(getter)["T-sw-lobster"] == "Other"
+
+
+def test_rule_list_is_tried_top_down_and_repeats_categories(tmp_path):
+    getter = make_label_getter(
+        tmp_path,
+        [
+            {"category": "HW", "issue_type": "Incident", "request_type": "%Hardware%"},
+            {"category": "DIS", "label": "lobster"},
+            {"category": "HW", "request_type": "%Hardware%"},
+        ],
+    )
+    assert categories_by_ticket(getter) == {
+        "T-hw-lobster": "HW",
+        "T-sw-lobster": "DIS",
+        "T-hw": "HW",
+        "T-none": "Other",
+    }
+    with getter.store.engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT * FROM weekly_support_summary WHERE week = '2025.10'")
+        ).mappings().one()
+    # one column per category, even when it appears in several rules
+    assert (row["open_hw"], row["open_dis"], row["open_other"]) == (2, 1, 1)
+
+
+def test_config_loads_rule_list(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "request_type_categories:\n"
+        "  - category: DIS\n"
+        "    label: lobster\n"
+        "  - category: HW\n"
+        "    request_type: '%Hardware%'\n",
+        encoding="utf-8",
+    )
+    assert Config.load(path).request_type_categories == [
+        {"category": "DIS", "label": "lobster"},
+        {"category": "HW", "request_type": "%Hardware%"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        "  - label: lobster\n",
+        "  - category: DIS\n",
+        "  - category: DIS\n    label: 'a,b'\n",
+    ],
+)
+def test_invalid_rules_are_rejected(tmp_path, rules):
+    path = tmp_path / "config.yaml"
+    path.write_text("request_type_categories:\n" + rules, encoding="utf-8")
+    with pytest.raises(ValueError):
+        Config.load(path)

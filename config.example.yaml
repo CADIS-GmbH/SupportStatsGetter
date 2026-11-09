@@ -15,6 +15,11 @@ jira_base_url: "https://your-site.atlassian.net"
 # Jira account email and API token (create one at
 # https://id.atlassian.com/manage-profile/security/api-tokens).
 # Keep the token secret; don't commit your config.yaml.
+# Leave either empty (null) to read it from the environment variable
+# SUPPORTSTATS_JIRA_USER / SUPPORTSTATS_JIRA_TOKEN instead, e.g. when the
+# config is shared. run.bat of the exe version asks for missing ones and saves
+# them for the Windows user; or set them with
+#   setx SUPPORTSTATS_JIRA_TOKEN "<token>"   (new windows pick it up).
 jira_user: "you@example.com"
 jira_token: "<your API token>"
 
@@ -76,7 +81,9 @@ non_support_request_types:
 # Groups tickets into categories. Each category lists patterns; a ticket gets
 # the first category with a matching pattern. A pattern is either
 #   - a SQL LIKE pattern (% = any text, case-insensitive) for the request type, or
-#   - issue_type and/or request_type LIKE patterns that must all match (AND).
+#   - issue_type, request_type and/or label patterns that must all match (AND).
+#     label matches when any of the ticket's labels contains the text
+#     (case-insensitive; no commas).
 # The KPIs get an open_<category> and closed_<category> column per category,
 # and the dashboard shows customers per category. Example:
 #   request_type_categories:
@@ -87,6 +94,16 @@ non_support_request_types:
 #       - issue_type: Incident
 #     HW:
 #       - "%Hardware%"
+# Or as a list of rules tried top-down, where a category can appear more than
+# once (the columns follow the first appearance of each category):
+#   request_type_categories:
+#     - category: HW
+#       issue_type: Incident
+#       label: hardware
+#     - category: DIS
+#       label: lobster
+#     - category: HW
+#       request_type: "%Hardware%"
 # Default (null): one category per issue type in support_issue_types, or per
 # stored issue type when that list is empty. {} = no categories.
 request_type_categories: null
@@ -154,6 +171,22 @@ no_contact_ignore_statuses:
 # Default: none.
 inactive_statuses:
   - "Waiting for development"
+
+# --- Assignee groups ---------------------------------------------------------
+# Jira labels that mark the team a ticket is assigned to, in priority order:
+# when a ticket has several of them, the first one in this list wins. The
+# ticket calendar stores the group at the start and end of each day
+# (start_assigned_group / end_assigned_group). Labels match case-insensitively.
+# Run once with --recalculate-all after changing the list.
+# Default: none (no groups are tracked).
+assignee_groups: []
+#   - 1stLevel
+#   - 2ndLevel
+#   - product-team
+
+# Group for tickets with none of the labels above, e.g. "1stLevel".
+# Default: null (no group).
+assignee_group_default: null
 
 # --- Backlog thresholds ------------------------------------------------------
 # Open tickets on Fridays are counted when they are open longer than these

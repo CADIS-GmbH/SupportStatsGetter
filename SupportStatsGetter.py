@@ -18,7 +18,9 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Iterable, Pattern, Mapping, Literal
 import re
+import os
 import shutil
+from contextlib import contextmanager
 import sys
 
 # Email patterns of internal agents used to detect response times. The patterns
@@ -92,6 +94,27 @@ DEFAULT_NO_CONTACT_IGNORE_STATUSES: list[str] = [
 # week. Config: ``inactive_statuses``.
 DEFAULT_INACTIVE_STATUSES: list[str] = []
 
+# Jira labels that mark the group a ticket is assigned to (e.g. 1stLevel,
+# 2ndLevel), in priority order: with several of them on a ticket the first one
+# in this list wins. Stored per day in start/end_assigned_group of the
+# calendar. Config: ``assignee_groups``; empty = no groups.
+DEFAULT_ASSIGNEE_GROUPS: list[str] = []
+# Group for tickets with none of the group labels. Config:
+# ``assignee_group_default``.
+DEFAULT_ASSIGNEE_GROUP: str | None = None
+
+# Exit code bits of --missing-credentials (run.bat asks for what's missing);
+# above the usual error code 1.
+MISSING_USER_EXIT = 8
+MISSING_TOKEN_EXIT = 16
+# Exit code when Jira rejects the login (401), e.g. an expired API token;
+# run.bat then asks for new credentials.
+JIRA_AUTH_FAILED_EXIT = 32
+
+
+class JiraAuthError(Exception):
+    """Jira rejected the credentials (HTTP 401)."""
+
 # Lower-cased status sets used at runtime, loaded from the config.
 CLOSED_STATUSES: set[str] = {s.lower() for s in DEFAULT_CLOSED_STATUSES}
 INACTIVE_STATUSES: set[str] = {s.lower() for s in DEFAULT_INACTIVE_STATUSES}
@@ -99,6 +122,8 @@ CANCELLED_STATUSES: set[str] = {s.lower() for s in DEFAULT_CANCELLED_STATUSES}
 RESOLUTION_TIME_EXCLUDED_STATUSES: set[str] = {
     s.lower() for s in DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES
 }
+ASSIGNEE_GROUPS: list[str] = DEFAULT_ASSIGNEE_GROUPS.copy()
+ASSIGNEE_GROUP_DEFAULT: str | None = DEFAULT_ASSIGNEE_GROUP
 
 # Request types excluded from the support KPIs. Can be set with
 # ``non_support_request_types`` in the config file.
@@ -109,19 +134,28 @@ DEFAULT_NON_SUPPORT_REQUEST_TYPES: list[str] = []
 DEFAULT_SUPPORT_ISSUE_TYPES: list[str] = ["Support"]
 
 # Request type categories used for the per-category columns in the summary
-# views: category -> patterns. A pattern is either a SQL LIKE pattern matched
-# against the request type, or a mapping with ``issue_type`` and/or
-# ``request_type`` LIKE patterns that must all match. The first matching
-# category wins; unmatched tickets get the default category. None gives one
-# category per issue type (the ``support_issue_types``, or every stored issue
-# type when that list is empty).
+# views. A pattern is either a SQL LIKE pattern matched against the request
+# type, or a mapping with ``issue_type``, ``request_type`` and/or ``label``
+# patterns that must all match (``label``: any label of the ticket contains
+# the text). Two forms:
+#   - category -> list of patterns; the categories are tried in order, or
+#   - a list of rules, each a pattern mapping plus ``category``; the rules are
+#     tried top-down, so a category can appear several times.
+# The first match wins; unmatched tickets get the default category. None gives
+# one category per issue type (the ``support_issue_types``, or every stored
+# issue type when that list is empty).
 # Can be set with ``request_type_categories`` and
 # ``request_type_category_default`` in the config file.
 CategoryPattern = str | dict[str, str]
-DEFAULT_REQUEST_TYPE_CATEGORIES: dict[str, list[CategoryPattern]] | None = None
+CategoryRules = dict[str, list[CategoryPattern]] | list[dict[str, str]]
+DEFAULT_REQUEST_TYPE_CATEGORIES: CategoryRules | None = None
 DEFAULT_REQUEST_TYPE_CATEGORY: str | None = None
 # pattern key -> jira_tickets column
-CATEGORY_PATTERN_COLUMNS = {"issue_type": "issuetype", "request_type": "request_type"}
+CATEGORY_PATTERN_COLUMNS = {
+    "issue_type": "issuetype",
+    "request_type": "request_type",
+    "label": "labels",
+}
 
 
 def normalize_category_pattern(pattern: Any) -> CategoryPattern:
@@ -133,8 +167,56 @@ def normalize_category_pattern(pattern: Any) -> CategoryPattern:
                 f"Invalid request_type_categories pattern {dict(pattern)!r}: "
                 f"use the keys {', '.join(CATEGORY_PATTERN_COLUMNS)}"
             )
+        if "," in str(pattern.get("label", "")):
+            raise ValueError(
+                f"Invalid request_type_categories pattern {dict(pattern)!r}: "
+                "a label pattern can't contain a comma"
+            )
         return {str(k): str(v) for k, v in pattern.items()}
     return str(pattern)
+
+
+def normalize_category_rules(value: Any) -> CategoryRules | None:
+    """Validate ``request_type_categories`` from the config (either form)."""
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return {
+            str(k): [normalize_category_pattern(p) for p in (v or [])]
+            for k, v in value.items()
+        }
+    rules: list[dict[str, str]] = []
+    for rule in value:
+        if not isinstance(rule, Mapping) or not rule.get("category"):
+            raise ValueError(
+                f"Invalid request_type_categories rule {rule!r}: "
+                "each rule needs a category"
+            )
+        pattern = {k: v for k, v in rule.items() if k != "category"}
+        rules.append(
+            {"category": str(rule["category"]), **normalize_category_pattern(pattern)}
+        )
+    return rules
+
+
+def category_rule_list(
+    value: CategoryRules,
+) -> tuple[list[str], list[tuple[str, dict[str, str]]]]:
+    """Return the categories in order and the (category, pattern) rules top-down."""
+    if isinstance(value, Mapping):
+        categories = list(value)
+        rules = [
+            (category, {"request_type": p} if isinstance(p, str) else dict(p))
+            for category, patterns in value.items()
+            for p in patterns
+        ]
+    else:
+        rules = [
+            (r["category"], {k: v for k, v in r.items() if k != "category"})
+            for r in value
+        ]
+        categories = list(dict.fromkeys(category for category, _ in rules))
+    return categories, rules
 
 # Columns of the summary views shown in the dashboard KPI table:
 # (column, label, number format). Columns missing in a view are skipped.
@@ -235,6 +317,27 @@ def log_call(func):
     return wrapper
 
 
+def missing_folder_message(
+    path: Path | None, setting: str, config_path: Path | None = None
+) -> str | None:
+    """Return an error message when the folder for ``path`` doesn't exist."""
+    if path is None:
+        return None
+    folder = Path(path).parent
+    if folder.is_dir():
+        return None
+    where = f" in {config_path}" if config_path else ""
+    relative = (
+        ""
+        if Path(path).is_absolute()
+        else f" (a relative path starts in the folder the program runs in: {Path.cwd()})"
+    )
+    return (
+        f"The folder for {setting} does not exist: {folder.resolve()}{relative}. "
+        f"Create the folder or change {setting}{where}."
+    )
+
+
 def setup_logging(level: str, log_file: Path) -> None:
     """Configure root logger with console and file handlers."""
     numeric = getattr(logging, level.upper(), logging.INFO)
@@ -283,7 +386,7 @@ class Config:
         default_factory=lambda: DEFAULT_SUPPORT_ISSUE_TYPES.copy()
     )
     # None = one category per issue type
-    request_type_categories: dict[str, list[CategoryPattern]] | None = None
+    request_type_categories: CategoryRules | None = None
     request_type_category_default: str | None = DEFAULT_REQUEST_TYPE_CATEGORY
     closed_statuses: list[str] = field(
         default_factory=lambda: DEFAULT_CLOSED_STATUSES.copy()
@@ -303,6 +406,11 @@ class Config:
     aged_days_short: int = DEFAULT_AGED_DAYS_SHORT
     aged_days_long: int = DEFAULT_AGED_DAYS_LONG
     no_contact_days: int = DEFAULT_NO_CONTACT_DAYS
+    # group labels in priority order, e.g. ["1stLevel", "2ndLevel"]; empty = no groups
+    assignee_groups: list[str] = field(
+        default_factory=lambda: DEFAULT_ASSIGNEE_GROUPS.copy()
+    )
+    assignee_group_default: str | None = DEFAULT_ASSIGNEE_GROUP
     # email domains of agents, e.g. ["example.com"]; adds to the internal_users table
     internal_email_domains: list[str] = field(default_factory=list)
     # Jira groups whose members are agents, e.g. ["service-desk-agents"]
@@ -312,6 +420,9 @@ class Config:
     @log_call
     def load(path: Path) -> "Config":
         """Load a YAML (.yaml/.yml) or JSON config file."""
+        # the root logger's methods, not logging.info(): those would set up a
+        # console handler before setup_logging() and every line would show twice
+        log = logging.getLogger()
         with open(path, "r", encoding="utf-8") as f:
             if Path(path).suffix.lower() in (".yaml", ".yml"):
                 data = yaml.safe_load(f) or {}
@@ -319,19 +430,34 @@ class Config:
                 data = json.load(f)
         unknown = sorted(set(data) - {option.name for option in fields(Config)})
         if unknown:
-            logging.warning("Unknown config options in %s: %s", path, ", ".join(unknown))
+            log.warning("Unknown config options in %s: %s", path, ", ".join(unknown))
 
         def as_list(key: str, default: list[str]) -> list[str]:
             # a key without entries (YAML null) is an empty list
             value = data.get(key, default)
             return [] if value is None else list(value)
 
+        def credential(key: str, env_var: str) -> str | None:
+            # the config value wins; empty or missing -> environment variable
+            value = data.get(key)
+            if value:
+                return str(value)
+            value = os.environ.get(env_var)
+            if value:
+                log.info("Using %s from the environment variable %s", key, env_var)
+                return value
+            log.warning(
+                "No %s: set it in %s or in the environment variable %s",
+                key, path, env_var,
+            )
+            return None
+
         categories = data.get("request_type_categories", DEFAULT_REQUEST_TYPE_CATEGORIES)
         return Config(
             db_path=Path(data.get("db_path", "support_stats.sqlite")),
             jira_base_url=(data.get("jira_base_url") or "").rstrip("/") or None,
-            jira_user=data.get("jira_user"),
-            jira_token=data.get("jira_token"),
+            jira_user=credential("jira_user", "SUPPORTSTATS_JIRA_USER"),
+            jira_token=credential("jira_token", "SUPPORTSTATS_JIRA_TOKEN"),
             base_jql=data.get("base_jql"),
             log_level=data.get("log_level", "INFO"),
             log_file=Path(data.get("log_file", "support_stats.log")),
@@ -354,10 +480,7 @@ class Config:
             support_issue_types=as_list(
                 "support_issue_types", DEFAULT_SUPPORT_ISSUE_TYPES
             ),
-            request_type_categories=None if categories is None else {
-                str(k): [normalize_category_pattern(p) for p in v]
-                for k, v in categories.items()
-            },
+            request_type_categories=normalize_category_rules(categories),
             request_type_category_default=data.get(
                 "request_type_category_default", DEFAULT_REQUEST_TYPE_CATEGORY
             ),
@@ -376,6 +499,12 @@ class Config:
             aged_days_short=int(data.get("aged_days_short", DEFAULT_AGED_DAYS_SHORT)),
             aged_days_long=int(data.get("aged_days_long", DEFAULT_AGED_DAYS_LONG)),
             no_contact_days=int(data.get("no_contact_days", DEFAULT_NO_CONTACT_DAYS)),
+            assignee_groups=[
+                str(g) for g in as_list("assignee_groups", DEFAULT_ASSIGNEE_GROUPS)
+            ],
+            assignee_group_default=data.get(
+                "assignee_group_default", DEFAULT_ASSIGNEE_GROUP
+            ),
             internal_email_domains=[
                 str(d) for d in as_list("internal_email_domains", [])
             ],
@@ -396,6 +525,8 @@ class JiraCalendarRecord:
     end_assigned_user: str | None = None
     start_assigned_user_email: str | None = None
     end_assigned_user_email: str | None = None
+    start_assigned_group: str | None = None
+    end_assigned_group: str | None = None
     start_request_type: str | None = None
     end_request_type: str | None = None
     start_issuetype: str | None = None
@@ -658,6 +789,38 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     return result
 
 
+def parse_labels(value: Any) -> list[str]:
+    """Return the labels of a Jira labels value.
+
+    Issue fields hold a list; changelog entries a string with the labels
+    separated by spaces (Jira labels can't contain spaces). Imported legacy
+    data separates them by commas and has labels with spaces, so a string
+    gives both its comma-separated parts and its single words.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(l).strip() for l in value if str(l).strip()]
+    parts = [l.strip() for l in str(value).split(",") if l.strip()]
+    words = [w for w in re.split(r"[\s,]+", str(value)) if w and w not in parts]
+    return parts + words
+
+
+def group_from_labels(labels: Iterable[str]) -> str | None:
+    """Return the assignee group for these labels.
+
+    That is the first of ``ASSIGNEE_GROUPS`` among the labels (case-insensitive),
+    else ``ASSIGNEE_GROUP_DEFAULT``; None when no groups are configured.
+    """
+    if not ASSIGNEE_GROUPS:
+        return None
+    present = {l.casefold() for l in labels}
+    for group in ASSIGNEE_GROUPS:
+        if group.casefold() in present:
+            return group
+    return ASSIGNEE_GROUP_DEFAULT
+
+
 def make_jira_ticket_calendar(
     issue: dict[str, Any],
     comments: list[dict[str, Any]],
@@ -689,6 +852,7 @@ def make_jira_ticket_calendar(
         int,
         str | None,
         str | None,
+        list[str],
     ]:
         """Reconstruct field values at ticket creation from the changelog."""
 
@@ -706,6 +870,7 @@ def make_jira_ticket_calendar(
         req_type = SupportStatsGetter._simple_value(req_type_raw)
         issuetype_raw = (fields.get("issuetype") or {}).get("name")
         issuetype = SupportStatsGetter._simple_value(issuetype_raw) or "Support"
+        labels = parse_labels(fields.get("labels"))
 
         histories = sorted(
             changelog, key=lambda h: h.get("created") or datetime.datetime.min, reverse=True
@@ -723,6 +888,8 @@ def make_jira_ticket_calendar(
                 elif field == "assignee":
                     user = str(prev_val)
                     user_email = None
+                elif field == "labels":
+                    labels = parse_labels(prev_val)
                 elif field == "priority":
                     priority = str(prev_val)
                     prio_pos = PRIORITY_POS_MAP.get(priority, 0)
@@ -739,6 +906,7 @@ def make_jira_ticket_calendar(
             prio_pos,
             req_type,
             issuetype,
+            labels,
         )
 
     (
@@ -749,7 +917,9 @@ def make_jira_ticket_calendar(
         priority_pos,
         request_type,
         issuetype,
+        labels,
     ) = derive_initial_state()
+    assigned_group = group_from_labels(labels)
 
     adjusted_days = 0
     adjusted_weekdays = 0
@@ -785,6 +955,7 @@ def make_jira_ticket_calendar(
         day_start_status = start_status
         day_start_user = assigned_user
         day_start_user_email = assigned_user_email
+        day_start_group = assigned_group
         day_start_priority_txt = priority_txt
         day_start_priority_pos = priority_pos
         day_start_request_type = request_type
@@ -816,6 +987,8 @@ def make_jira_ticket_calendar(
                         start_status = to_string or start_status
                     elif field and field.lower() == "assignee":
                         assigned_user = to_string or assigned_user
+                    elif field and field.lower() == "labels":
+                        assigned_group = group_from_labels(parse_labels(to_string))
                     elif field and field.lower() == "priority":
                         prev_priority_pos = priority_pos
                         priority_txt = to_string or priority_txt
@@ -850,6 +1023,8 @@ def make_jira_ticket_calendar(
             end_assigned_user=assigned_user,
             start_assigned_user_email=day_start_user_email,
             end_assigned_user_email=assigned_user_email,
+            start_assigned_group=day_start_group,
+            end_assigned_group=assigned_group,
             did_escalate_priority=day_escalated_priority,
             start_priority_txt=day_start_priority_txt,
             start_priority_pos=day_start_priority_pos,
@@ -891,13 +1066,52 @@ def make_jira_ticket_calendar(
 class DatabaseStore:
     """Simple wrapper around a database using SQLAlchemy."""
 
+    # connection of an open batch(); None = each call commits on its own
+    _batch_conn: Any = None
+
+    @contextmanager
+    def batch(self):
+        """Run the store calls inside one transaction, committed at the end.
+
+        Each commit syncs the database file to disk, which is slow (especially
+        in a cloud-synced folder), so bulk work like recalculating all tickets
+        commits once per batch instead of several times per ticket.
+        """
+        if self._batch_conn is not None:
+            yield self._batch_conn
+            return
+        with self.engine.begin() as conn:
+            self._batch_conn = conn
+            try:
+                yield conn
+            finally:
+                self._batch_conn = None
+
+    @contextmanager
+    def _begin(self):
+        """A connection in a transaction: the open batch, else a new one."""
+        if self._batch_conn is not None:
+            yield self._batch_conn
+        else:
+            with self.engine.begin() as conn:
+                yield conn
+
+    @contextmanager
+    def _connect(self):
+        """A connection for reading: the open batch (sees its writes), else a new one."""
+        if self._batch_conn is not None:
+            yield self._batch_conn
+        else:
+            with self.engine.connect() as conn:
+                yield conn
+
     @log_call
     def __init__(
         self,
         engine: Engine | None = None,
         non_support_request_types: Iterable[str] | None = None,
         support_issue_types: Iterable[str] | None = None,
-        request_type_categories: Mapping[str, Iterable[CategoryPattern]] | None = None,
+        request_type_categories: CategoryRules | None = None,
         request_type_category_default: str | None = DEFAULT_REQUEST_TYPE_CATEGORY,
         closed_statuses: Iterable[str] | None = None,
         cancelled_statuses: Iterable[str] | None = None,
@@ -921,10 +1135,7 @@ class DatabaseStore:
         else:
             self.support_issue_types = [str(value) for value in support_issue_types]
         # None = one category per issue type, resolved when the views are created
-        self.request_type_categories = None if request_type_categories is None else {
-            str(k): [normalize_category_pattern(p) for p in v]
-            for k, v in request_type_categories.items()
-        }
+        self.request_type_categories = normalize_category_rules(request_type_categories)
         self.request_type_category_default = request_type_category_default
         self.closed_statuses = [
             str(value)
@@ -1059,6 +1270,8 @@ class DatabaseStore:
             Column("end_assigned_user", String),
             Column("start_assigned_user_email", String),
             Column("end_assigned_user_email", String),
+            Column("start_assigned_group", String),
+            Column("end_assigned_group", String),
             Column("start_request_type", String),
             Column("end_request_type", String),
             Column("start_issuetype", String),
@@ -1111,6 +1324,13 @@ class DatabaseStore:
             Column("reporting_quarter", String),
         )
         self.meta.create_all(self.engine)
+        # per-ticket lookups (loading a ticket, replacing its calendar) would
+        # otherwise scan the whole table; also added to existing databases
+        with self.engine.begin() as conn:
+            for table in ("jira_comments", "jira_worklogs", "jira_changelog", "jira_calendar"):
+                conn.execute(
+                    text(f"CREATE INDEX IF NOT EXISTS ix_{table}_ticket_id ON {table} (ticket_id)")
+                )
 
         # week to reporting month/quarter lookup, covering every year from the
         # oldest stored ticket to the current year; extended by insert_many
@@ -1172,7 +1392,7 @@ class DatabaseStore:
                         "reporting_quarter": f"{year}.Q{quarter}",
                     }
                 )
-        with self.engine.begin() as conn:
+        with self._begin() as conn:
             conn.execute(self.week_reporting.insert().prefix_with("OR IGNORE"), rows)
         self._reporting_years.update(years)
 
@@ -1211,12 +1431,13 @@ class DatabaseStore:
 
         is_junk_expr = f"CASE WHEN LOWER(jt.status) IN ({cancelled}) THEN 1 ELSE 0 END"
 
-        def category_condition(pattern: CategoryPattern) -> str:
-            # a plain pattern matches the request type; a mapping ANDs its patterns
-            if isinstance(pattern, str):
-                pattern = {"request_type": pattern}
+        def category_condition(pattern: Mapping[str, str]) -> str:
+            # the patterns of a rule are AND-connected; labels are stored
+            # comma-separated, so "any label contains x" is labels LIKE %x%
             return " AND ".join(
-                f"jt.{CATEGORY_PATTERN_COLUMNS[key]} LIKE {sql_str(value)}"
+                f"jt.labels LIKE {sql_str('%' + value + '%')}"
+                if key == "label"
+                else f"jt.{CATEGORY_PATTERN_COLUMNS[key]} LIKE {sql_str(value)}"
                 for key, value in pattern.items()
             )
 
@@ -1226,10 +1447,10 @@ class DatabaseStore:
                 issuetype: [{"issue_type": issuetype}]
                 for issuetype in self._category_issue_types()
             }
+        categories, category_rules = category_rule_list(request_type_categories)
         when_clauses = [
             f"WHEN {category_condition(pattern)} THEN {sql_str(category)}"
-            for category, patterns in request_type_categories.items()
-            for pattern in patterns
+            for category, pattern in category_rules
         ]
         default_category = (
             sql_str(self.request_type_category_default)
@@ -1244,7 +1465,6 @@ class DatabaseStore:
             request_type_expr = default_category
 
         # one open_<category> / closed_<category> column per category
-        categories = list(request_type_categories)
         if (
             self.request_type_category_default
             and self.request_type_category_default not in categories
@@ -1384,6 +1604,8 @@ class DatabaseStore:
                 jc.end_assigned_user,
                 jc.start_assigned_user_email,
                 jc.end_assigned_user_email,
+                jc.start_assigned_group,
+                jc.end_assigned_group,
                 jc.start_request_type,
                 jc.end_request_type,
                 jc.start_issuetype,
@@ -1508,6 +1730,61 @@ class DatabaseStore:
         with self.engine.begin() as conn:
             self._drop_view_if_exists(conn, "customer_weekly_summary")
             conn.execute(text(customer_view_sql))
+
+        # the tickets behind high_or_critical_tickets and escalated_tickets, to
+        # follow up on: one row per ticket and ISO week, with the same filters
+        is_escalation = "(jc.did_escalate_priority = 1 AND jc.end_priority_pos > jc.start_priority_pos)"
+        priority_view_sql = f"""
+            CREATE VIEW priority_tickets AS
+            WITH flagged AS (
+                SELECT
+                    jc.ticket_id,
+                    jc.cw AS week,
+                    MAX(CASE WHEN jc.end_priority_pos > 0 THEN 1 ELSE 0 END) AS high_priority,
+                    MAX(CASE WHEN {is_escalation} THEN 1 ELSE 0 END) AS escalated,
+                    MIN(CASE WHEN {is_escalation} THEN jc.date END) AS escalated_on,
+                    MAX(jc.end_priority_pos) AS top_priority_pos
+                FROM jira_calendar jc
+                JOIN jira_tickets jt ON jt.id = jc.ticket_id
+                WHERE (jc.end_priority_pos > 0 OR {is_escalation})
+                  AND {not_cancelled("jt.status")}
+                  AND jc.is_junk != 1
+                  {calendar_request_type_filter}
+                  {calendar_support_filter}
+                GROUP BY jc.ticket_id, jc.cw
+            )
+            SELECT
+                f.week,
+                wr.reporting_month AS month,
+                wr.reporting_quarter AS quarter,
+                jt.key AS ticket_key,
+                jt.summary,
+                COALESCE(NULLIF(jt.primary_organization, ''), '(none)') AS organization,
+                {request_type_expr} AS request_type_category,
+                jt.request_type,
+                f.high_priority,
+                f.escalated,
+                DATE(f.escalated_on) AS escalated_on,
+                (
+                    SELECT jc2.end_priority_txt
+                    FROM jira_calendar jc2
+                    WHERE jc2.ticket_id = f.ticket_id AND jc2.cw = f.week
+                    ORDER BY jc2.end_priority_pos DESC, jc2.date DESC
+                    LIMIT 1
+                ) AS week_priority,
+                jt.priority AS current_priority,
+                jt.status AS current_status,
+                jt.assignee AS current_assignee,
+                DATE(jt.created) AS created,
+                DATE(jt.resolved) AS resolved
+            FROM flagged f
+            JOIN jira_tickets jt ON jt.id = f.ticket_id
+            JOIN week_reporting wr ON wr.calendar_week = f.week
+            ORDER BY f.week DESC, f.escalated DESC, f.top_priority_pos DESC, jt.key
+        """
+        with self.engine.begin() as conn:
+            self._drop_view_if_exists(conn, "priority_tickets")
+            conn.execute(text(priority_view_sql))
 
         # per internal user and ISO week: tickets worked on, split by kind of action.
         # Comments and changelog entries (one per history entry, so a status change
@@ -1893,6 +2170,10 @@ class DatabaseStore:
         if "end_assigned_user_email" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_assigned_user_email VARCHAR"))
+        for col in ("start_assigned_group", "end_assigned_group"):
+            if col not in cols:
+                with self.engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE jira_calendar ADD COLUMN {col} VARCHAR"))
         if "start_request_type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN start_request_type VARCHAR"))
@@ -1961,7 +2242,7 @@ class DatabaseStore:
             return
         if table is self.jira_tickets or table is self.jira_calendar:
             self._extend_week_reporting(rows)
-        with self.engine.begin() as conn:
+        with self._begin() as conn:
             conn.execute(table.insert().prefix_with("OR REPLACE"), rows)
 
     def _extend_week_reporting(self, rows: list[dict[str, Any]]) -> None:
@@ -2016,7 +2297,7 @@ class DatabaseStore:
     def update_changelog_internal_flags(self, ticket_id: str) -> None:
         """Re-evaluate the internal flag of a ticket's stored changelog entries."""
         table = self.jira_changelog
-        with self.engine.begin() as conn:
+        with self._begin() as conn:
             authors = conn.execute(
                 select(table.c.author, table.c.author_email)
                 .where(table.c.ticket_id == ticket_id)
@@ -2065,7 +2346,7 @@ class DatabaseStore:
     @log_call
     def get_ticket_with_related(self, ticket_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         """Load a ticket and related records from the database."""
-        with self.engine.connect() as conn:
+        with self._connect() as conn:
             t = (
                 conn.execute(
                     select(self.jira_tickets).where(self.jira_tickets.c.id == ticket_id)
@@ -2152,6 +2433,9 @@ class SupportStatsGetter:
     def __init__(self, config: Config):
         self.config = config
         self.http = jira_session()
+        message = missing_folder_message(config.db_path, "db_path")
+        if message:
+            raise FileNotFoundError(message)
         engine = create_engine(f"sqlite+pysqlite:///{config.db_path}")
         self.store = DatabaseStore(
             engine,
@@ -2174,6 +2458,9 @@ class SupportStatsGetter:
         }
         global INACTIVE_STATUSES
         INACTIVE_STATUSES = {s.lower() for s in config.inactive_statuses}
+        global ASSIGNEE_GROUPS, ASSIGNEE_GROUP_DEFAULT
+        ASSIGNEE_GROUPS = list(config.assignee_groups)
+        ASSIGNEE_GROUP_DEFAULT = config.assignee_group_default
         global INTERNAL_EMAIL_PATTERNS
         INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns() + [
             # "manus.plus" or "@manus.plus" matches addresses ending in @manus.plus
@@ -2277,22 +2564,39 @@ class SupportStatsGetter:
             return (self.config.jira_user, self.config.jira_token)
         return None
 
+    def _check_jira_auth(self, response: requests.Response) -> requests.Response:
+        """Raise ``JiraAuthError`` when Jira rejected the login."""
+        if response.status_code == 401:
+            raise JiraAuthError(
+                f"Jira rejected the login for {self.config.jira_user!r} (401 Unauthorized): "
+                "the API token has probably expired or was revoked, or the email "
+                "address is wrong. Create a new token at "
+                "https://id.atlassian.com/manage-profile/security/api-tokens and set it "
+                "in jira_token in the config or in the environment variable "
+                "SUPPORTSTATS_JIRA_TOKEN (run.bat asks for it)."
+            )
+        return response
+
     def _jira_get(self, url: str, params: dict[str, Any]) -> requests.Response:
-        return self.http.get(
-            url,
-            params=params,
-            auth=self._jira_auth(),
-            headers={"Accept": "application/json"},
-            timeout=JIRA_TIMEOUT,
+        return self._check_jira_auth(
+            self.http.get(
+                url,
+                params=params,
+                auth=self._jira_auth(),
+                headers={"Accept": "application/json"},
+                timeout=JIRA_TIMEOUT,
+            )
         )
 
     def _jira_post(self, url: str, payload: dict[str, Any]) -> requests.Response:
-        return self.http.post(
-            url,
-            json=payload,
-            auth=self._jira_auth(),
-            headers={"Accept": "application/json"},
-            timeout=JIRA_TIMEOUT,
+        return self._check_jira_auth(
+            self.http.post(
+                url,
+                json=payload,
+                auth=self._jira_auth(),
+                headers={"Accept": "application/json"},
+                timeout=JIRA_TIMEOUT,
+            )
         )
 
     @log_call
@@ -2377,7 +2681,7 @@ class SupportStatsGetter:
                     row_idx = first_row
                     for data_row in dataframe_to_rows(df, index=False, header=False):
                         for col_idx, value in enumerate(data_row, start=start_col):
-                            ws.cell(row=row_idx, column=col_idx, value=sanitize_value(value))
+                            ws.cell(row=row_idx, column=col_idx, value=value)
                         row_idx += 1
                     old_last_row = ws[old_end].row
                     num_cols = len(df.columns)
@@ -2389,15 +2693,49 @@ class SupportStatsGetter:
                 else:
                     ws.delete_rows(1, ws.max_row)
                     for row in dataframe_to_rows(df, index=False, header=True):
-                        ws.append([sanitize_value(v) for v in row])
+                        ws.append(row)
             else:
                 ws = wb.create_sheet(title=safe_name)
                 for row in dataframe_to_rows(df, index=False, header=True):
-                    ws.append([sanitize_value(v) for v in row])
+                    ws.append(row)
 
+        self._format_priority_sheet(wb, exported)
         self._write_dashboard(wb, exported)
         wb.save(output_file)
         logging.info("Finished exporting Excel workbook to %s", output_file)
+
+    def _format_priority_sheet(
+        self,
+        wb: Workbook,
+        exported: Mapping[str, tuple[str, pd.DataFrame]],
+    ) -> None:
+        """Make the priority_tickets sheet a follow-up list next to the dashboard.
+
+        Ticket keys link to Jira, the header row stays visible and has filters
+        (e.g. on week, month or quarter), and the sheet comes right after the
+        dashboard.
+        """
+        if "priority_tickets" not in exported:
+            return
+        sheet, df = exported["priority_tickets"]
+        ws = wb[sheet]
+        wb.move_sheet(ws, offset=-wb.index(ws))
+        ws.freeze_panes = "A2"
+        if not df.empty:
+            ws.auto_filter.ref = ws.dimensions
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        base_url = (self.config.jira_base_url or "").rstrip("/")
+        key_col = df.columns.get_loc("ticket_key") + 1
+        if base_url:
+            for row in range(2, len(df) + 2):
+                cell = ws.cell(row=row, column=key_col)
+                if cell.value:
+                    cell.hyperlink = f"{base_url}/browse/{cell.value}"
+                    cell.style = "Hyperlink"
+        widths = {"summary": 60, "organization": 30, "request_type": 30, "current_assignee": 22}
+        for col, name in enumerate(df.columns, start=1):
+            ws.column_dimensions[get_column_letter(col)].width = widths.get(name, 14)
 
     def _write_dashboard(
         self,
@@ -2771,11 +3109,26 @@ class SupportStatsGetter:
         """Recalculate KPI and mapped fields for all stored tickets."""
         with self.store.engine.connect() as conn:
             tickets = [tid for (tid,) in conn.execute(select(self.store.jira_tickets.c.id)).fetchall()]
-        self.recalculate_tickets(tickets)
+        logging.info("Recalculating %d tickets", len(tickets))
+        batch_size = 500
+        for start in range(0, len(tickets), batch_size):
+            self.recalculate_tickets(tickets[start:start + batch_size])
+            logging.info(
+                "Recalculated %d of %d tickets",
+                min(start + batch_size, len(tickets)),
+                len(tickets),
+            )
 
     @log_call
     def recalculate_tickets(self, ticket_ids: Iterable[str]) -> None:
-        """Recalculate KPI and mapped fields for the given ticket ids."""
+        """Recalculate KPI and mapped fields for the given ticket ids.
+
+        All changes are committed together at the end.
+        """
+        with self.store.batch():
+            self._recalculate_tickets(ticket_ids)
+
+    def _recalculate_tickets(self, ticket_ids: Iterable[str]) -> None:
         for ticket_id in ticket_ids:
             issue_row, comments, worklogs, changelog = self.store.get_ticket_with_related(
                 ticket_id
@@ -2870,7 +3223,7 @@ class SupportStatsGetter:
                 changelog,
                 self.config.custom_fields.get("request_type"),
             )
-            with self.store.engine.begin() as conn:
+            with self.store._begin() as conn:
                 conn.execute(
                     delete(self.store.jira_calendar).where(
                         self.store.jira_calendar.c.ticket_id == ticket_id
@@ -3295,10 +3648,6 @@ def sync_jira_tickets(
             processed_issue = calculate_kpi_fields(issue, comments, changelog)
             batch.append(processed_issue)
 
-            getter.store_jira_comments(issue["id"], issue.get("key"), comments)
-            getter.store_jira_worklogs(issue["id"], worklogs)
-            getter.store_jira_changelog(issue["id"], changelog)
-
             calendar_rows = make_jira_ticket_calendar(
                 issue,
                 comments,
@@ -3307,7 +3656,12 @@ def sync_jira_tickets(
                 getter.config.custom_fields.get("request_type"),
                 getter.config.priority_deescalation_ignore_minutes,
             )
-            getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
+            # one commit per ticket instead of one per table
+            with getter.store.batch():
+                getter.store_jira_comments(issue["id"], issue.get("key"), comments)
+                getter.store_jira_worklogs(issue["id"], worklogs)
+                getter.store_jira_changelog(issue["id"], changelog)
+                getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
             calendar_total += len(calendar_rows)
 
             comments_total += len(comments)
@@ -3380,6 +3734,16 @@ if __name__ == "__main__":
             "Ignored once the database contains tickets."
         ),
     )
+    parser.add_argument(
+        "--missing-credentials",
+        action="store_true",
+        help=(
+            "Only check the Jira credentials (config or environment) and exit: "
+            f"code {MISSING_USER_EXIT} = no jira_user, {MISSING_TOKEN_EXIT} = no "
+            f"jira_token, {MISSING_USER_EXIT | MISSING_TOKEN_EXIT} = both, 0 = both set. "
+            "Used by run.bat."
+        ),
+    )
     args = parser.parse_args()
 
     if args.config:
@@ -3405,10 +3769,37 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     cfg = Config.load(cfg_path)
+    if args.missing_credentials:
+        raise SystemExit(
+            (0 if cfg.jira_user else MISSING_USER_EXIT)
+            | (0 if cfg.jira_token else MISSING_TOKEN_EXIT)
+        )
     log_level = args.log_level or cfg.log_level
-    setup_logging(log_level, cfg.log_file)
-
     output_excel = Path(args.output_excel) if args.output_excel else cfg.output_excel
+
+    # without its folder the log can't be written: report on the console only
+    message = missing_folder_message(cfg.log_file, "log_file", cfg_path)
+    if message:
+        logging.basicConfig(level=logging.ERROR, format="%(levelname)s - %(message)s")
+        logging.error(message)
+        raise SystemExit(1)
+    setup_logging(log_level, cfg.log_file)
+    messages = [
+        message
+        for message in (
+            missing_folder_message(cfg.db_path, "db_path", cfg_path),
+            missing_folder_message(
+                output_excel,
+                "output_excel" if not args.output_excel else "--output-excel",
+                None if args.output_excel else cfg_path,
+            ),
+        )
+        if message
+    ]
+    if messages:
+        for message in messages:
+            logging.error(message)
+        raise SystemExit(1)
 
     getter = SupportStatsGetter(cfg)
     logging.info("Running SupportStatsGetter")
@@ -3429,6 +3820,10 @@ if __name__ == "__main__":
                     since,
                 )
             sync_jira_tickets(getter, since, args.recalculate_all)
+        except JiraAuthError as error:
+            # no report from outdated data: the run has to fail visibly
+            logging.error("%s No Excel report was written.", error)
+            raise SystemExit(JIRA_AUTH_FAILED_EXIT)
         except Exception:  # noqa: BLE001
             logging.exception("Failed to fetch or store Jira data")
     else:

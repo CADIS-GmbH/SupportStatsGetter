@@ -5,4 +5,5 @@ SQLAlchemy>=2.0.42,<2.1
 html2text
 pandas
 openpyxl
+lxml  # makes openpyxl write the Excel export about 2.5x faster
 PyYAML
