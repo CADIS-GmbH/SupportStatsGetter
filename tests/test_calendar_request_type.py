@@ -2,7 +2,7 @@ import datetime
 from SupportStatsGetter import make_jira_ticket_calendar
 
 
-def test_request_type_category_in_calendar():
+def test_request_type_tracked_in_calendar():
     issue = {
         "id": "1",
         "key": "TST-1",
@@ -18,15 +18,9 @@ def test_request_type_category_in_calendar():
             ],
         }
     ]
-    rows = make_jira_ticket_calendar(
-        issue,
-        [],
-        [],
-        changelog,
-        {"Support": "support", "Service": "service"},
-        "Request Type",
-    )
-    assert rows[0]["start_issue_category"] == "support"
-    assert rows[1]["start_issue_category"] == "support"
-    assert rows[1]["end_issue_category"] == "service"
-    assert rows[2]["start_issue_category"] == "service"
+    rows = make_jira_ticket_calendar(issue, [], [], changelog, "Request Type")
+    assert rows[0]["start_request_type"] == "Support"
+    assert rows[0]["end_request_type"] == "Support"
+    assert rows[1]["start_request_type"] == "Support"
+    assert rows[1]["end_request_type"] == "Service"
+    assert rows[2]["start_request_type"] == "Service"

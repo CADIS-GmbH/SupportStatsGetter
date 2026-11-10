@@ -7,7 +7,6 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from SupportStatsGetter import Config, SupportStatsGetter, make_jira_ticket_calendar
-from scripts.import_teamsupport import map_history
 
 
 def test_recalculate_all_preserves_priority_escalation(tmp_path):
@@ -57,8 +56,6 @@ def test_recalculate_all_preserves_priority_escalation(tmp_path):
             "date": change_time.date(),
             "comments": 0,
             "public_comments": 0,
-            "start_assigned_group": "1stLevel",
-            "end_assigned_group": "1stLevel",
             "start_assigned_user": None,
             "end_assigned_user": None,
             "start_assigned_user_email": None,
@@ -136,15 +133,16 @@ def test_recalculate_all_detects_priority_escalation_from_history(tmp_path):
         }
     ])
 
-    hist = {
-        "ID": "h1",
-        "Description": "Changed severity from 'Normal' to 'Critical'",
-        "Actor": "Agent",
-        "CreatorID": "0",
-        "DateCreated": change_time.isoformat(),
+    cl = {
+        "id": "h1-0",
+        "history_id": "h1",
+        "ticket_id": ticket_id,
+        "author": "Agent",
+        "created": change_time,
+        "field": "priority",
+        "from_string": "Normal",
+        "to_string": "Critical",
     }
-    cl = map_history(hist, ticket_id)
-    cl["created"] = cl["created"].replace(tzinfo=None)
 
     getter.store.insert_many(getter.store.jira_changelog, [cl])
 

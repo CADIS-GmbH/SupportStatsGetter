@@ -2,8 +2,7 @@
 ====================
 
 Tool for collecting ticket statistics from **Jira Service Management**.
-The data is stored in a normalized SQLite database. The code is based on
-``TeamSupportStatsGetter.py`` but no longer supports TeamSupport.
+The data is stored in a normalized SQLite database.
 """
 
 from __future__ import annotations
@@ -15,153 +14,273 @@ import inspect
 import argparse
 import json
 import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Iterable, Pattern, Mapping, Literal
 import re
+import os
 import shutil
+from contextlib import contextmanager
+import sys
 
 # Email patterns of internal agents used to detect response times. The patterns
-# are loaded from the ``internal_users`` table at runtime.
+# are loaded from the ``internal_users`` table at runtime, plus one per domain
+# in ``internal_email_domains`` from the config.
 INTERNAL_EMAIL_PATTERNS: list[Pattern[str]] = []
+# Members of the Jira groups in ``internal_groups`` (account ids and display
+# names). None when no groups are configured: then the Jira account type decides
+# for authors without a matching email address.
+INTERNAL_ACCOUNT_IDS: set[str] | None = None
+INTERNAL_NAMES: set[str] = set()
 # Patterns used to map organization names to a primary organization. Loaded
 # from the ``org_lookup`` table at runtime.
 ORG_PATTERNS: list[tuple[Pattern[str], str, int]] = []
 
-# Mapping of priority names to numeric positions
-PRIORITY_POS_MAP = {
-    "C": -100,
-    "B": 0,
-    "A": 100,
-    "AA": 200,
-    "Offen": 0,
-    "Open": 0,
+# Default mapping of priority names to numeric positions. Positions above 0
+# count as high priority. Can be overridden with ``priority_positions`` in the
+# config file.
+DEFAULT_PRIORITY_POSITIONS = {
+    "Lowest": -200,
     "Low": -100,
-    "Normal": 0,
     "Medium": 0,
+    "Normal": 0,
     "High": 100,
+    "Highest": 200,
     "Critical": 200,
 }
+# Mapping used at runtime, loaded from the config.
+PRIORITY_POS_MAP: dict[str, int] = DEFAULT_PRIORITY_POSITIONS.copy()
 
-# Order of labels used to determine assigned group
-GROUP_PRIORITY = [
-    "1stLevel",
-    "2ndLevel",
-    "DIS-Lobster",
-    "hardware",
-    "product-team",
-    "operation",
+# Status lists below are matched case-insensitively and can be set in the
+# config file under the key named in each comment.
+
+# Statuses in which a ticket counts as closed: resolved date, open days and
+# open ticket counts. Config: ``closed_statuses``.
+DEFAULT_CLOSED_STATUSES: list[str] = ["Resolved", "Closed", "Cancelled"]
+
+# Statuses that mark a ticket as cancelled (is_junk) and exclude it from the
+# summary KPIs. Config: ``cancelled_statuses``.
+DEFAULT_CANCELLED_STATUSES: list[str] = ["Cancelled"]
+
+# Statuses that do not count towards adjusted resolution time.
+# Config: ``resolution_time_excluded_statuses``.
+DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES: list[str] = [
+    "Closed",
+    "Cancelled",
+    "Resolved",
+    "Waiting for customer",
+    "Pending",
 ]
 
-# Statuses that do not count towards adjusted resolution time
-STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME = {
-    "CLOSED",
-    "CANCELLED",
-    "RESOLVED",
-    "WAITING FOR CUSTOMER",
-    "PENDING",
+# Day thresholds of the backlog KPIs: open longer than ``aged_days_short`` /
+# ``aged_days_long`` days (columns aged_5_plus / aged_30_plus) and more than
+# ``no_contact_days`` weekdays without contact (over5_days_no_contact). The
+# column names stay the same when the thresholds change.
+DEFAULT_AGED_DAYS_SHORT = 5
+DEFAULT_AGED_DAYS_LONG = 30
+DEFAULT_NO_CONTACT_DAYS = 5
+
+# Statuses that are treated as closed for the "over 5 days no contact" KPI.
+# Config: ``no_contact_ignore_statuses``.
+DEFAULT_NO_CONTACT_IGNORE_STATUSES: list[str] = [
+    "Closed",
+    "Resolved",
+    "Cancelled",
+    "Pending",
+]
+
+# Statuses in which a ticket is not active, e.g. waiting for development: a
+# week the ticket spent entirely in these statuses doesn't count as an active
+# week. Config: ``inactive_statuses``.
+DEFAULT_INACTIVE_STATUSES: list[str] = []
+
+# Jira labels that mark the group a ticket is assigned to (e.g. 1stLevel,
+# 2ndLevel), in priority order: with several of them on a ticket the first one
+# in this list wins. Stored per day in start/end_assigned_group of the
+# calendar. Config: ``assignee_groups``; empty = no groups.
+DEFAULT_ASSIGNEE_GROUPS: list[str] = []
+# Group for tickets with none of the group labels. Config:
+# ``assignee_group_default``.
+DEFAULT_ASSIGNEE_GROUP: str | None = None
+
+# Exit code bits of --missing-credentials (run.bat asks for what's missing);
+# above the usual error code 1.
+MISSING_USER_EXIT = 8
+MISSING_TOKEN_EXIT = 16
+# Exit code when Jira rejects the login (401), e.g. an expired API token;
+# run.bat then asks for new credentials.
+JIRA_AUTH_FAILED_EXIT = 32
+
+
+class JiraAuthError(Exception):
+    """Jira rejected the credentials (HTTP 401)."""
+
+# Lower-cased status sets used at runtime, loaded from the config.
+CLOSED_STATUSES: set[str] = {s.lower() for s in DEFAULT_CLOSED_STATUSES}
+INACTIVE_STATUSES: set[str] = {s.lower() for s in DEFAULT_INACTIVE_STATUSES}
+CANCELLED_STATUSES: set[str] = {s.lower() for s in DEFAULT_CANCELLED_STATUSES}
+RESOLUTION_TIME_EXCLUDED_STATUSES: set[str] = {
+    s.lower() for s in DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES
+}
+ASSIGNEE_GROUPS: list[str] = DEFAULT_ASSIGNEE_GROUPS.copy()
+ASSIGNEE_GROUP_DEFAULT: str | None = DEFAULT_ASSIGNEE_GROUP
+
+# Request types excluded from the support KPIs. Can be set with
+# ``non_support_request_types`` in the config file.
+DEFAULT_NON_SUPPORT_REQUEST_TYPES: list[str] = []
+
+# Issue types counted in the support summary views. Can be set with
+# ``support_issue_types`` in the config file. An empty list counts all types.
+DEFAULT_SUPPORT_ISSUE_TYPES: list[str] = ["Support"]
+
+# Request type categories used for the per-category columns in the summary
+# views. A pattern is either a SQL LIKE pattern matched against the request
+# type, or a mapping with ``issue_type``, ``request_type`` and/or ``label``
+# patterns that must all match (``label``: any label of the ticket contains
+# the text). Two forms:
+#   - category -> list of patterns; the categories are tried in order, or
+#   - a list of rules, each a pattern mapping plus ``category``; the rules are
+#     tried top-down, so a category can appear several times.
+# The first match wins; unmatched tickets get the default category. None gives
+# one category per issue type (the ``support_issue_types``, or every stored
+# issue type when that list is empty).
+# Can be set with ``request_type_categories`` and
+# ``request_type_category_default`` in the config file.
+CategoryPattern = str | dict[str, str]
+CategoryRules = dict[str, list[CategoryPattern]] | list[dict[str, str]]
+DEFAULT_REQUEST_TYPE_CATEGORIES: CategoryRules | None = None
+DEFAULT_REQUEST_TYPE_CATEGORY: str | None = None
+# pattern key -> jira_tickets column
+CATEGORY_PATTERN_COLUMNS = {
+    "issue_type": "issuetype",
+    "request_type": "request_type",
+    "label": "labels",
 }
 
-# Statuses that are treated as closed for the "over 5 days no contact" KPI
-NO_CONTACT_IGNORE_STATUSES = {
-    "CLOSED",
-    "RESOLVED",
-    "CANCELLED",
-    "CLOSED",
-    "PENDING",
+
+def normalize_category_pattern(pattern: Any) -> CategoryPattern:
+    """Validate a request type category pattern from the config."""
+    if isinstance(pattern, Mapping):
+        unknown = sorted(set(pattern) - set(CATEGORY_PATTERN_COLUMNS))
+        if unknown or not pattern:
+            raise ValueError(
+                f"Invalid request_type_categories pattern {dict(pattern)!r}: "
+                f"use the keys {', '.join(CATEGORY_PATTERN_COLUMNS)}"
+            )
+        if "," in str(pattern.get("label", "")):
+            raise ValueError(
+                f"Invalid request_type_categories pattern {dict(pattern)!r}: "
+                "a label pattern can't contain a comma"
+            )
+        return {str(k): str(v) for k, v in pattern.items()}
+    return str(pattern)
+
+
+def normalize_category_rules(value: Any) -> CategoryRules | None:
+    """Validate ``request_type_categories`` from the config (either form)."""
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return {
+            str(k): [normalize_category_pattern(p) for p in (v or [])]
+            for k, v in value.items()
+        }
+    rules: list[dict[str, str]] = []
+    for rule in value:
+        if not isinstance(rule, Mapping) or not rule.get("category"):
+            raise ValueError(
+                f"Invalid request_type_categories rule {rule!r}: "
+                "each rule needs a category"
+            )
+        pattern = {k: v for k, v in rule.items() if k != "category"}
+        rules.append(
+            {"category": str(rule["category"]), **normalize_category_pattern(pattern)}
+        )
+    return rules
+
+
+def category_rule_list(
+    value: CategoryRules,
+) -> tuple[list[str], list[tuple[str, dict[str, str]]]]:
+    """Return the categories in order and the (category, pattern) rules top-down."""
+    if isinstance(value, Mapping):
+        categories = list(value)
+        rules = [
+            (category, {"request_type": p} if isinstance(p, str) else dict(p))
+            for category, patterns in value.items()
+            for p in patterns
+        ]
+    else:
+        rules = [
+            (r["category"], {k: v for k, v in r.items() if k != "category"})
+            for r in value
+        ]
+        categories = list(dict.fromkeys(category for category, _ in rules))
+    return categories, rules
+
+# Columns of the summary views shown in the dashboard KPI table:
+# (column, label, number format). Columns missing in a view are skipped.
+DASHBOARD_METRICS: list[tuple[str, str, str]] = [
+    ("new_tickets", "New", "0"),
+    ("closed_tickets", "Closed", "0"),
+    ("ongoing_tickets", "Active", "0"),
+    ("close_rate", "Close rate", "0%"),
+    ("median_first_reply_minutes", "Median first reply (min)", "0"),
+    ("avg_resolution_days", "Avg resolution (days)", "0.0"),
+    ("high_or_critical_tickets", "High / critical", "0"),
+    ("escalated_tickets", "Priority escalated", "0"),
+    ("overall_open", "Open on Fridays", "0.0"),
+    # {aged_days_short}, {aged_days_long} and {no_contact_days} come from the config
+    ("aged_5_plus", "Open > {aged_days_short} days", "0"),
+    ("aged_30_plus", "Open > {aged_days_long} days", "0"),
+    ("unassigned", "Unassigned", "0.0"),
+    ("over5_days_no_contact", "> {no_contact_days} days no contact", "0.0"),
+    ("csat_score", "CSAT score", "0.00"),
+    ("csat_answers", "CSAT answers", "0"),
+]
+# Metrics without a value for periods without data; shown as #N/A so charts
+# leave a gap instead of dropping to 0.
+DASHBOARD_NULLABLE_METRICS = {
+    "median_first_reply_minutes",
+    "avg_resolution_days",
+    "close_rate",
+    "csat_score",
 }
-
-DEFAULT_NON_SUPPORT_REQUEST_TYPES = [
-    "Maintenance & Service Operations",
-    "Product trial questions",
-    "Change request",
-    "Licensing and billing questions"
+# Dashboard charts: (title, chart type, columns). "open_*" / "closed_*" expand
+# to the per-category columns.
+DASHBOARD_CHARTS: list[tuple[str, str, list[str]]] = [
+    ("New vs. closed tickets", "col", ["new_tickets", "closed_tickets"]),
+    ("Close rate (closed / new)", "line", ["close_rate"]),
+    ("Open backlog (Fridays)", "line", ["overall_open", "aged_5_plus", "aged_30_plus"]),
+    ("Unassigned and no contact (Fridays)", "line", ["unassigned", "over5_days_no_contact"]),
+    ("Median first reply (minutes)", "line", ["median_first_reply_minutes"]),
+    ("Average resolution time (days)", "line", ["avg_resolution_days"]),
+    ("Active tickets by category", "stacked", ["open_*"]),
+    ("Closed tickets by category", "stacked", ["closed_*"]),
+    ("High priority and escalations", "col", ["high_or_critical_tickets", "escalated_tickets"]),
+    ("CSAT score", "line", ["csat_score"]),
 ]
-
-# Resolver alias lookup in priority order: (alias, real name, level)
-DEFAULT_RESOLVER_ALIASES: list[tuple[str, str, int]] = [
-    ("Abdelrahman Khamis", "Abdelrahman Khamis", 1),
-    ("Abdelrahman.Khamis", "Abdelrahman Khamis", 1),
-    ("Ali Ahmed", "Ali Mohamed", 1),
-    ("Ali Mohamed", "Ali Mohamed", 1),
-    ("Ali.Mohamed", "Ali Mohamed", 1),
-    ("Anne Leske", "Anne Leske", 3),
-    ("Anne.Leske", "Anne Leske", 3),
-    ("Benedikt Wagner", "Benedikt Wagner", 2),
-    ("Benedikt.Wagner", "Benedikt Wagner", 2),
-    ("Erik von R\u30b0sten", "Erik von R\u30b0sten", 3),
-    ("Erik.vonR\u30b0sten", "Erik von R\u30b0sten", 3),
-    ("Inge Emmerichs", "Inge Emmerichs", 3),
-    ("Inge.Emmerichs", "Inge Emmerichs", 3),
-    ("Isabelle Lernbass", "Isabelle Lernbass", 3),
-    ("Isabelle.Lernbass", "Isabelle Lernbass", 3),
-    ("Johannes Arneth", "Johannes Arneth", 3),
-    ("Johannes.Arneth", "Johannes Arneth", 3),
-    ("Julian Beyer", "Julian Beyer", 2),
-    ("Julian.Beyer", "Julian Beyer", 2),
-    ("Mohamed Shebl", "Mohamed Shebl", 1),
-    ("Mohamed.Shebl", "Mohamed Shebl", 1),
-    ("Nermine Rashad", "Nermine Rashad", 1),
-    ("Nermine.Rashad", "Nermine Rashad", 1),
-    ("M\u30b0ller", "Ullrich M\u30b0ller", 3),
-    ("Ulli M\u30b0ller", "Ullrich M\u30b0ller", 3),
-    ("Ulli.M\u30b0ller", "Ullrich M\u30b0ller", 3),
-    ("Ullrich M\u30b0ller", "Ullrich M\u30b0ller", 3),
-    ("Ullrich.M\u30b0ller", "Ullrich M\u30b0ller", 3),
-    ("Winfried Gillich", "Winfried Gillich", 3),
-    ("Winfried.Gillich", "Winfried Gillich", 3),
-    ("Gillich", "Winfried Gillich", 3),
-    ("Franz Renger", "Franz Renger", 3),
-    ("Franz.Renger", "Franz Renger", 3),
-    ("Khalil Boukhdoud", "Khalil Boukhdoud", 3),
-    ("Khalil.Boukhdoud", "Khalil Boukhdoud", 3),
-    ("Stephan Schneider", "Stephan Schneider", 2),
-    ("Stephan.Schneider", "Stephan Schneider", 2),
-    ("Stefan Lieth", "Stefan Lieth", 3),
-    ("Stefan.Lieth", "Stefan Lieth", 3),
-    ("Hamud.AlHammoud", "Hamud Al Hammoud", 3),
-    ("Hamud Al Hammoud", "Hamud Al Hammoud", 3),
-    ("Al Hammoud, Hamud", "Hamud Al Hammoud", 3),
-    ("Andr\u30bc Hinz", "Andr\u30bc Hinz", 3),
-    ("Andre Hinz", "Andr\u30bc Hinz", 3),
-    ("Andr\u30bc.Hinz", "Andr\u30bc Hinz", 3),
-    ("Andre.Hinz", "Andr\u30bc Hinz", 3),
-    ("Cornelia Hagner", "Cornelia Hagner", 3),
-    ("Cornelia.Hagner", "Cornelia Hagner", 3),
-    ("Gillich, Winfried", "Winfried Gillich", 3),
-    ("M\u30b0ller, Ullrich", "Ullrich M\u30b0ller", 3),
-    ("Thomas.Wagner", "Thomas Wagner", 2),
-    ("Thomas Wagner", "Thomas Wagner", 2),
-    ("Armin Dobner", "Armin Dobner", 3),
-    ("Armin.Dobner", "Armin Dobner", 3),
-    ("Martin.G\u0411rick", "Martin G\u0411rick", 3),
-    ("Martin G\u0411rick", "Martin G\u0411rick", 3),
-]
-
-# ------------------------------
-# Regex to extract structured fields for resolution summaries
-# ------------------------------
-RESOLUTION_BLOCK_REGEX = re.compile(
-    r"(?:Resolution Summary by Rovo:.*?)?"
-    r"Category:\s*(?P<category>.*?)(?=Summary:)"
-    r"Summary:\s*(?P<summary>.*?)(?=Rationale:)"
-    r"Rationale:\s*(?P<rationale>.*?)(?=Suggested new category:|Resolver:|Outcome:)",
-    re.DOTALL,
-)
-RESOLUTION_OPTIONAL_NEW_CATEGORY = re.compile(
-    r"Suggested new category:\s*(?P<newcat>.*?)(?=Resolver:|Outcome:)", re.DOTALL
-)
-RESOLUTION_RESOLVER_REGEX = re.compile(
-    r"Resolver:\s*(?P<resolver_line>.*?)(?=Outcome:)", re.DOTALL
-)
-RESOLUTION_OUTCOME_REGEX = re.compile(r"Outcome:\s*(?P<outcome>.*)", re.DOTALL)
+DASHBOARD_TOP_CUSTOMERS = 15
 
 #the script will pull Jira tickets starting from the lastest update timestamp in the db minus this time in minutes.
 JIRA_PULL_OVERLAP_MIN = 5 #60*24*7  #5
 
+# Jira requests: (connect, read) timeout in seconds, so a dead connection fails
+# fast instead of hanging until the operating system drops it
+JIRA_TIMEOUT = (15, 120)
+# Retries per Jira request on dropped connections, timeouts, 429 and 5xx
+# (waits 2, 4, 8, 16, ... seconds; honours Retry-After)
+JIRA_RETRIES = 6
+# Tickets are saved to the database after every this many processed tickets,
+# so an aborted run resumes from the last saved batch
+TICKET_BATCH_SIZE = 50
+
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import dateutil.parser
 import pytz
+import yaml
 import pandas as pd
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, DateTime, Boolean,
@@ -173,6 +292,13 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.chart import BarChart, LineChart
+from openpyxl.chart.data_source import AxDataSource, NumDataSource, NumRef, StrRef
+from openpyxl.chart.series import Series, SeriesLabel
+from openpyxl.formatting.rule import FormulaRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.workbook.defined_name import DefinedName
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
 def log_call(func):
@@ -189,6 +315,27 @@ def log_call(func):
         return func(*args, **kwargs)
 
     return wrapper
+
+
+def missing_folder_message(
+    path: Path | None, setting: str, config_path: Path | None = None
+) -> str | None:
+    """Return an error message when the folder for ``path`` doesn't exist."""
+    if path is None:
+        return None
+    folder = Path(path).parent
+    if folder.is_dir():
+        return None
+    where = f" in {config_path}" if config_path else ""
+    relative = (
+        ""
+        if Path(path).is_absolute()
+        else f" (a relative path starts in the folder the program runs in: {Path.cwd()})"
+    )
+    return (
+        f"The folder for {setting} does not exist: {folder.resolve()}{relative}. "
+        f"Create the folder or change {setting}{where}."
+    )
 
 
 def setup_logging(level: str, log_file: Path) -> None:
@@ -225,37 +372,145 @@ class Config:
     excel_write_mode: Literal[
         "overwrite_with_backup", "overwrite", "no_overwrite"
     ] = "overwrite_with_backup"
+    # first quarter shown on the Excel dashboard, e.g. "2025.Q1"; None = one year back
+    dashboard_start_quarter: str | None = None
     custom_fields: dict[str, str] = field(default_factory=dict)
     non_support_request_types: list[str] = field(
         default_factory=lambda: DEFAULT_NON_SUPPORT_REQUEST_TYPES.copy()
     )
     priority_deescalation_ignore_minutes: int = 5
+    priority_positions: dict[str, int] = field(
+        default_factory=lambda: DEFAULT_PRIORITY_POSITIONS.copy()
+    )
+    support_issue_types: list[str] = field(
+        default_factory=lambda: DEFAULT_SUPPORT_ISSUE_TYPES.copy()
+    )
+    # None = one category per issue type
+    request_type_categories: CategoryRules | None = None
+    request_type_category_default: str | None = DEFAULT_REQUEST_TYPE_CATEGORY
+    closed_statuses: list[str] = field(
+        default_factory=lambda: DEFAULT_CLOSED_STATUSES.copy()
+    )
+    cancelled_statuses: list[str] = field(
+        default_factory=lambda: DEFAULT_CANCELLED_STATUSES.copy()
+    )
+    resolution_time_excluded_statuses: list[str] = field(
+        default_factory=lambda: DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES.copy()
+    )
+    no_contact_ignore_statuses: list[str] = field(
+        default_factory=lambda: DEFAULT_NO_CONTACT_IGNORE_STATUSES.copy()
+    )
+    inactive_statuses: list[str] = field(
+        default_factory=lambda: DEFAULT_INACTIVE_STATUSES.copy()
+    )
+    aged_days_short: int = DEFAULT_AGED_DAYS_SHORT
+    aged_days_long: int = DEFAULT_AGED_DAYS_LONG
+    no_contact_days: int = DEFAULT_NO_CONTACT_DAYS
+    # group labels in priority order, e.g. ["1stLevel", "2ndLevel"]; empty = no groups
+    assignee_groups: list[str] = field(
+        default_factory=lambda: DEFAULT_ASSIGNEE_GROUPS.copy()
+    )
+    assignee_group_default: str | None = DEFAULT_ASSIGNEE_GROUP
+    # email domains of agents, e.g. ["example.com"]; adds to the internal_users table
+    internal_email_domains: list[str] = field(default_factory=list)
+    # Jira groups whose members are agents, e.g. ["service-desk-agents"]
+    internal_groups: list[str] = field(default_factory=list)
 
     @staticmethod
     @log_call
     def load(path: Path) -> "Config":
+        """Load a YAML (.yaml/.yml) or JSON config file."""
+        # the root logger's methods, not logging.info(): those would set up a
+        # console handler before setup_logging() and every line would show twice
+        log = logging.getLogger()
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            if Path(path).suffix.lower() in (".yaml", ".yml"):
+                data = yaml.safe_load(f) or {}
+            else:
+                data = json.load(f)
+        unknown = sorted(set(data) - {option.name for option in fields(Config)})
+        if unknown:
+            log.warning("Unknown config options in %s: %s", path, ", ".join(unknown))
+
+        def as_list(key: str, default: list[str]) -> list[str]:
+            # a key without entries (YAML null) is an empty list
+            value = data.get(key, default)
+            return [] if value is None else list(value)
+
+        def credential(key: str, env_var: str) -> str | None:
+            # the config value wins; empty or missing -> environment variable
+            value = data.get(key)
+            if value:
+                return str(value)
+            value = os.environ.get(env_var)
+            if value:
+                log.info("Using %s from the environment variable %s", key, env_var)
+                return value
+            # without a Jira site (export only) no credentials are needed
+            if data.get("jira_base_url"):
+                log.warning(
+                    "No %s: set it in %s or in the environment variable %s",
+                    key, path, env_var,
+                )
+            return None
+
+        categories = data.get("request_type_categories", DEFAULT_REQUEST_TYPE_CATEGORIES)
         return Config(
             db_path=Path(data.get("db_path", "support_stats.sqlite")),
-            jira_base_url=data.get("jira_base_url"),
-            jira_user=data.get("jira_user"),
-            jira_token=data.get("jira_token"),
+            jira_base_url=(data.get("jira_base_url") or "").rstrip("/") or None,
+            jira_user=credential("jira_user", "SUPPORTSTATS_JIRA_USER"),
+            jira_token=credential("jira_token", "SUPPORTSTATS_JIRA_TOKEN"),
             base_jql=data.get("base_jql"),
             log_level=data.get("log_level", "INFO"),
             log_file=Path(data.get("log_file", "support_stats.log")),
             output_excel=Path(data["output_excel"]) if data.get("output_excel") else None,
             excel_write_mode=data.get("excel_write_mode", "overwrite_with_backup"),
+            dashboard_start_quarter=data.get("dashboard_start_quarter"),
             custom_fields=data.get("custom_fields", {}),
-            non_support_request_types=list(
-                data.get(
-                    "non_support_request_types",
-                    DEFAULT_NON_SUPPORT_REQUEST_TYPES,
-                )
+            non_support_request_types=as_list(
+                "non_support_request_types", DEFAULT_NON_SUPPORT_REQUEST_TYPES
             ),
             priority_deescalation_ignore_minutes=data.get(
                 "priority_deescalation_ignore_minutes", 5
             ),
+            priority_positions={
+                str(k): int(v)
+                for k, v in data.get(
+                    "priority_positions", DEFAULT_PRIORITY_POSITIONS
+                ).items()
+            },
+            support_issue_types=as_list(
+                "support_issue_types", DEFAULT_SUPPORT_ISSUE_TYPES
+            ),
+            request_type_categories=normalize_category_rules(categories),
+            request_type_category_default=data.get(
+                "request_type_category_default", DEFAULT_REQUEST_TYPE_CATEGORY
+            ),
+            closed_statuses=as_list("closed_statuses", DEFAULT_CLOSED_STATUSES),
+            cancelled_statuses=as_list(
+                "cancelled_statuses", DEFAULT_CANCELLED_STATUSES
+            ),
+            resolution_time_excluded_statuses=as_list(
+                "resolution_time_excluded_statuses",
+                DEFAULT_RESOLUTION_TIME_EXCLUDED_STATUSES,
+            ),
+            no_contact_ignore_statuses=as_list(
+                "no_contact_ignore_statuses", DEFAULT_NO_CONTACT_IGNORE_STATUSES
+            ),
+            inactive_statuses=as_list("inactive_statuses", DEFAULT_INACTIVE_STATUSES),
+            aged_days_short=int(data.get("aged_days_short", DEFAULT_AGED_DAYS_SHORT)),
+            aged_days_long=int(data.get("aged_days_long", DEFAULT_AGED_DAYS_LONG)),
+            no_contact_days=int(data.get("no_contact_days", DEFAULT_NO_CONTACT_DAYS)),
+            assignee_groups=[
+                str(g) for g in as_list("assignee_groups", DEFAULT_ASSIGNEE_GROUPS)
+            ],
+            assignee_group_default=data.get(
+                "assignee_group_default", DEFAULT_ASSIGNEE_GROUP
+            ),
+            internal_email_domains=[
+                str(d) for d in as_list("internal_email_domains", [])
+            ],
+            internal_groups=[str(g) for g in as_list("internal_groups", [])],
         )
 
 
@@ -268,12 +523,12 @@ class JiraCalendarRecord:
     ticket_key: str
     comments: int = 0
     public_comments: int = 0
-    start_assigned_group: str = "1stLevel"
-    end_assigned_group: str = "1stLevel"
     start_assigned_user: str | None = None
     end_assigned_user: str | None = None
     start_assigned_user_email: str | None = None
     end_assigned_user_email: str | None = None
+    start_assigned_group: str | None = None
+    end_assigned_group: str | None = None
     start_request_type: str | None = None
     end_request_type: str | None = None
     start_issuetype: str | None = None
@@ -320,38 +575,89 @@ def cw_string_from_datetime(dt: datetime.datetime | None) -> str | None:
     return f"{dt.isocalendar().year}.{dt.isocalendar().week:02}"
 
 
-def active_weeks(start: datetime.datetime | None, end: datetime.datetime | None) -> str | None:
-    """Return comma separated list of ISO weeks between two dates."""
-    if not start or not end:
-        return None
+def _weeks_between(start: datetime.datetime, end: datetime.datetime) -> set[str]:
     weeks: set[str] = set()
     d = start
     while d <= end:
         weeks.add(cw_string_from_datetime(d))
         d += datetime.timedelta(days=7)
     weeks.add(cw_string_from_datetime(end))
-    return ",".join(sorted(weeks))
+    return weeks
+
+
+def active_weeks(
+    start: datetime.datetime | None,
+    end: datetime.datetime | None,
+    changelog: list[dict[str, Any]] | None = None,
+    current_status: str | None = None,
+) -> str | None:
+    """Return comma separated list of ISO weeks between two dates.
+
+    With ``INACTIVE_STATUSES`` configured and the ``changelog`` given, only
+    weeks in which the ticket spent some time in another status are returned:
+    a week spent entirely in inactive statuses is not an active week.
+    """
+    if not start or not end:
+        return None
+    if not INACTIVE_STATUSES or changelog is None:
+        return ",".join(sorted(_weeks_between(start, end)))
+
+    changes = sorted(
+        (hist["created"], item.get("fromString"), item.get("toString"))
+        for hist in changelog
+        if hist.get("created")
+        for item in hist.get("items", [])
+        if item.get("field") == "status"
+    )
+    # walk the status timeline from start to end; weeks with an active status count
+    status = changes[0][1] if changes else current_status
+    seg_start = start
+    weeks: set[str] = set()
+
+    def add_segment(seg_end: datetime.datetime) -> None:
+        if seg_end > seg_start and (status or "").lower() not in INACTIVE_STATUSES:
+            # the end itself belongs to the next status
+            weeks.update(_weeks_between(seg_start, seg_end - datetime.timedelta(microseconds=1)))
+
+    for changed, _, to_status in changes:
+        if changed >= end:
+            break
+        if changed > seg_start:
+            add_segment(changed)
+            seg_start = changed
+        status = to_status
+    add_segment(end)
+    return ",".join(sorted(weeks)) or None
 
 
 def is_internal_user(author: Mapping[str, Any] | None) -> bool:
     """Return True if the author appears to be an internal user.
 
     The email address is checked first. If present and matching one of the
-    configured internal patterns, the author is considered internal. If the
-    email address is present but does not match any pattern, the author is
-    treated as external. If no email address is available, the Jira
-    ``accountType`` property is inspected. A value of ``customer`` means the
-    author is external, any other value is assumed to be internal.
+    configured internal patterns, the author is considered internal.
+
+    With ``internal_groups`` configured, every other author is internal only
+    when a member of one of those groups: by account id, or by display name for
+    stored records without one.
+
+    Without groups, an email address that matches no pattern means external.
+    If no email address is available, the Jira ``accountType`` property is
+    inspected. A value of ``customer`` means the author is external, any other
+    value is assumed to be internal.
     """
 
     if not author:
         return False
 
     email = author.get("emailAddress")
+    if email and any(pattern.search(email) for pattern in INTERNAL_EMAIL_PATTERNS):
+        return True
+    if INTERNAL_ACCOUNT_IDS is not None:
+        account_id = author.get("accountId")
+        if account_id:
+            return account_id in INTERNAL_ACCOUNT_IDS
+        return author.get("displayName") in INTERNAL_NAMES
     if email:
-        for pattern in INTERNAL_EMAIL_PATTERNS:
-            if pattern.search(email):
-                return True
         return False
 
     account_type = author.get("accountType")
@@ -360,14 +666,6 @@ def is_internal_user(author: Mapping[str, Any] | None) -> bool:
     if account_type:
         return True
     return False
-
-
-def group_from_labels(labels: list[str]) -> str:
-    """Return the first matching group label or ``1stLevel`` if none found."""
-    for grp in GROUP_PRIORITY:
-        if grp in labels:
-            return grp
-    return "1stLevel"
 
 
 def primary_org_from_names(names: list[str]) -> str | None:
@@ -401,14 +699,24 @@ def primary_org_from_names(names: list[str]) -> str | None:
 
 
 def extract_resolved_date(changelog: list[dict[str, Any]]) -> datetime.datetime | None:
-    """Return the date when status changed to Closed, Resolved or Cancelled."""
-    closing = {"Closed", "Resolved", "Cancelled"}
+    """Return when the ticket was last closed.
+
+    That is the latest status change from a status outside ``CLOSED_STATUSES``
+    into one of them. Moves between closed statuses (e.g. an automation that
+    closes resolved tickets weeks later) don't change it, and a reopened and
+    closed again ticket gets the date of its last closing.
+    """
+    resolved = None
     histories = sorted(changelog, key=lambda h: h.get("created") or datetime.datetime.min)
     for hist in histories:
         for item in hist.get("items", []):
-            if item.get("field") == "status" and item.get("toString") in closing:
-                return hist.get("created")
-    return None
+            if (
+                item.get("field") == "status"
+                and (item.get("fromString") or "").lower() not in CLOSED_STATUSES
+                and (item.get("toString") or "").lower() in CLOSED_STATUSES
+            ):
+                resolved = hist.get("created")
+    return resolved
 
 
 def extract_first_response_date(comments: list[dict[str, Any]]) -> datetime.datetime | None:
@@ -450,12 +758,20 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     result = issue.copy()
     created = result.get("created")
     updated = result.get("updated")
-    resolved = result.get("resolved") or extract_resolved_date(changelog)
+    # The status history decides, not Jira's resolutiondate: workflows often set
+    # the resolution only when an automation closes a resolved ticket weeks
+    # later. Jira's date is the fallback for tickets without status history. A
+    # ticket that is open again has no resolved date.
+    status = ((result.get("fields") or {}).get("status") or {}).get("name")
+    if status is None or status.lower() in CLOSED_STATUSES:
+        resolved = extract_resolved_date(changelog) or result.get("resolved")
+    else:
+        resolved = None
     result["resolved"] = resolved
 
     result["CreatedWeek"] = cw_string_from_datetime(created)
     result["ResolvedWeek"] = cw_string_from_datetime(resolved)
-    result["ActiveWeeks"] = active_weeks(created, resolved or updated)
+    result["ActiveWeeks"] = active_weeks(created, resolved or updated, changelog, status)
     fields = result.get("fields", {})
     result["FirstResponseDate"] = extract_first_response_date(comments)
     result["LastResponseDate"] = extract_last_response_date(comments)
@@ -475,64 +791,36 @@ def calculate_kpi_fields(issue: dict[str, Any], comments: list[dict[str, Any]], 
     return result
 
 
-def extract_resolution_data(body: str) -> dict[str, Any] | None:
-    """Extracts structured fields from a resolution summary block."""
-    block = RESOLUTION_BLOCK_REGEX.search(body)
-    if not block:
+def parse_labels(value: Any) -> list[str]:
+    """Return the labels of a Jira labels value.
+
+    Issue fields hold a list; changelog entries a string with the labels
+    separated by spaces (Jira labels can't contain spaces). Imported legacy
+    data separates them by commas and has labels with spaces, so a string
+    gives both its comma-separated parts and its single words.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(l).strip() for l in value if str(l).strip()]
+    parts = [l.strip() for l in str(value).split(",") if l.strip()]
+    words = [w for w in re.split(r"[\s,]+", str(value)) if w and w not in parts]
+    return parts + words
+
+
+def group_from_labels(labels: Iterable[str]) -> str | None:
+    """Return the assignee group for these labels.
+
+    That is the first of ``ASSIGNEE_GROUPS`` among the labels (case-insensitive),
+    else ``ASSIGNEE_GROUP_DEFAULT``; None when no groups are configured.
+    """
+    if not ASSIGNEE_GROUPS:
         return None
-
-    data = block.groupdict()
-    newcat_match = RESOLUTION_OPTIONAL_NEW_CATEGORY.search(body)
-    data["new_category"] = newcat_match.group("newcat").strip() if newcat_match else None
-
-    resolver_match = RESOLUTION_RESOLVER_REGEX.search(body)
-    if resolver_match:
-        resolvers = resolver_match.group("resolver_line").strip()
-        resolver_list = [r.strip() for r in resolvers.split(",") if r.strip()]
-        data["resolvers"] = resolver_list
-        data["primary_resolver"] = resolver_list[0] if resolver_list else None
-        data["resolve_helpers"] = resolver_list[1:] if len(resolver_list) > 1 else []
-    else:
-        data["resolvers"] = []
-        data["primary_resolver"] = None
-        data["resolve_helpers"] = []
-
-    outcome_match = RESOLUTION_OUTCOME_REGEX.search(body)
-    data["outcome"] = outcome_match.group("outcome").strip() if outcome_match else None
-
-    for key in ["category", "summary", "rationale"]:
-        if data.get(key):
-            data[key] = data[key].strip()
-
-    return data
-
-
-def map_resolvers_from_text(text: str, aliases: list[dict[str, Any]]) -> list[tuple[str, int]]:
-    """Map aliases found in text in order of appearance, using priority to break ties."""
-    lower = text.casefold()
-    hits: list[tuple[int, int, str, int]] = []
-    for alias in aliases:
-        alias_cf = str(alias["alias_cf"])
-        pos = lower.find(alias_cf)
-        if pos != -1:
-            hits.append(
-                (
-                    pos,
-                    int(alias["priority"]),
-                    str(alias["canonical_name"]),
-                    int(alias["level"]),
-                )
-            )
-    hits.sort(key=lambda x: (x[0], x[1]))
-
-    ordered: list[tuple[str, int]] = []
-    seen = set()
-    for _, _, real, level in hits:
-        if real not in seen:
-            ordered.append((real, level))
-            seen.add(real)
-
-    return ordered
+    present = {l.casefold() for l in labels}
+    for group in ASSIGNEE_GROUPS:
+        if group.casefold() in present:
+            return group
+    return ASSIGNEE_GROUP_DEFAULT
 
 
 def make_jira_ticket_calendar(
@@ -562,19 +850,17 @@ def make_jira_ticket_calendar(
         str,
         str | None,
         str | None,
-        list[str],
-        str,
         str,
         int,
         str | None,
         str | None,
+        list[str],
     ]:
         """Reconstruct field values at ticket creation from the changelog."""
 
         status = (fields.get("status") or {}).get("name", "Open")
         user = (fields.get("assignee") or {}).get("displayName")
         user_email = (fields.get("assignee") or {}).get("emailAddress")
-        lbls: list[str] = list(fields.get("labels") or [])
         priority = (fields.get("priority") or {}).get("name") or ""
 
         prio_pos = PRIORITY_POS_MAP.get(priority, 0)
@@ -586,6 +872,7 @@ def make_jira_ticket_calendar(
         req_type = SupportStatsGetter._simple_value(req_type_raw)
         issuetype_raw = (fields.get("issuetype") or {}).get("name")
         issuetype = SupportStatsGetter._simple_value(issuetype_raw) or "Support"
+        labels = parse_labels(fields.get("labels"))
 
         histories = sorted(
             changelog, key=lambda h: h.get("created") or datetime.datetime.min, reverse=True
@@ -604,11 +891,7 @@ def make_jira_ticket_calendar(
                     user = str(prev_val)
                     user_email = None
                 elif field == "labels":
-                    if isinstance(prev_val, list):
-                        lbls = [str(l) for l in prev_val]
-                    else:
-                        lbls = [l.strip() for l in str(prev_val).split(",") if l.strip()]
-                    assigned_group = group_from_labels(lbls)
+                    labels = parse_labels(prev_val)
                 elif field == "priority":
                     priority = str(prev_val)
                     prio_pos = PRIORITY_POS_MAP.get(priority, 0)
@@ -621,25 +904,24 @@ def make_jira_ticket_calendar(
             status,
             user,
             user_email,
-            lbls,
-            group_from_labels(lbls),
             priority,
             prio_pos,
             req_type,
             issuetype,
+            labels,
         )
 
     (
         start_status,
         assigned_user,
         assigned_user_email,
-        labels,
-        assigned_group,
         priority_txt,
         priority_pos,
         request_type,
         issuetype,
+        labels,
     ) = derive_initial_state()
+    assigned_group = group_from_labels(labels)
 
     adjusted_days = 0
     adjusted_weekdays = 0
@@ -707,6 +989,8 @@ def make_jira_ticket_calendar(
                         start_status = to_string or start_status
                     elif field and field.lower() == "assignee":
                         assigned_user = to_string or assigned_user
+                    elif field and field.lower() == "labels":
+                        assigned_group = group_from_labels(parse_labels(to_string))
                     elif field and field.lower() == "priority":
                         prev_priority_pos = priority_pos
                         priority_txt = to_string or priority_txt
@@ -718,12 +1002,9 @@ def make_jira_ticket_calendar(
                             if ts - pending_escalation_ts <= escalation_grace:
                                 pending_escalation_ts = None
                             else:
-                                if priority_pos > 0:    #only count if the ne prority is higher than 0 (A, AA)
+                                if prev_priority_pos > 0:    #only count if the escalated priority was higher than 0 (A, AA)
                                     day_escalated_priority = True
                                 pending_escalation_ts = None
-                    elif field and field.lower() == "labels":
-                        labels = [l.strip() for l in (to_string or "").split(",") if l.strip()]
-                        assigned_group = group_from_labels(labels) or assigned_group
                     elif field and field.lower() in {req_field_lower, "request type"}:
                         request_type = to_string or request_type
                     elif field and field.lower() in {issuetype_field_lower, "issue type"}:
@@ -740,12 +1021,12 @@ def make_jira_ticket_calendar(
             ticket_key=issue.get("key"),
             comments=day_actions,
             public_comments=day_public,
-            start_assigned_group=day_start_group or "1stLevel",
-            end_assigned_group=assigned_group or "1stLevel",
             start_assigned_user=day_start_user,
             end_assigned_user=assigned_user,
             start_assigned_user_email=day_start_user_email,
             end_assigned_user_email=assigned_user_email,
+            start_assigned_group=day_start_group,
+            end_assigned_group=assigned_group,
             did_escalate_priority=day_escalated_priority,
             start_priority_txt=day_start_priority_txt,
             start_priority_pos=day_start_priority_pos,
@@ -762,19 +1043,19 @@ def make_jira_ticket_calendar(
             weekdays_days_since_last_contact=days_since_contact,
             adjusted_resolution_days=adjusted_days,
             adjusted_resolution_weekdays=adjusted_weekdays,
-            is_junk=start_status.lower() == "cancelled",
+            is_junk=start_status.lower() in CANCELLED_STATUSES,
         )
         record.did_resolve = (
-            not day_start_status.lower().startswith("closed")
-            and record.end_status.lower() in {"resolved", "closed", "cancelled"}
+            day_start_status.lower() not in CLOSED_STATUSES
+            and record.end_status.lower() in CLOSED_STATUSES
         )
         results.append(record.__dict__)
 
-        if start_status.upper() not in STATUS_TO_EXCLUDE_FROM_RESOLUTION_TIME:
+        if start_status.lower() not in RESOLUTION_TIME_EXCLUDED_STATUSES:
             adjusted_days += 1
             if cur.isoweekday() < 6:
                 adjusted_weekdays += 1
-        if start_status.lower() not in {"resolved", "closed", "cancelled"}:
+        if start_status.lower() not in CLOSED_STATUSES:
             days_open += 1
         if day_public == 0 and cur.isoweekday() < 6:
             days_since_contact += 1
@@ -787,11 +1068,59 @@ def make_jira_ticket_calendar(
 class DatabaseStore:
     """Simple wrapper around a database using SQLAlchemy."""
 
+    # connection of an open batch(); None = each call commits on its own
+    _batch_conn: Any = None
+
+    @contextmanager
+    def batch(self):
+        """Run the store calls inside one transaction, committed at the end.
+
+        Each commit syncs the database file to disk, which is slow (especially
+        in a cloud-synced folder), so bulk work like recalculating all tickets
+        commits once per batch instead of several times per ticket.
+        """
+        if self._batch_conn is not None:
+            yield self._batch_conn
+            return
+        with self.engine.begin() as conn:
+            self._batch_conn = conn
+            try:
+                yield conn
+            finally:
+                self._batch_conn = None
+
+    @contextmanager
+    def _begin(self):
+        """A connection in a transaction: the open batch, else a new one."""
+        if self._batch_conn is not None:
+            yield self._batch_conn
+        else:
+            with self.engine.begin() as conn:
+                yield conn
+
+    @contextmanager
+    def _connect(self):
+        """A connection for reading: the open batch (sees its writes), else a new one."""
+        if self._batch_conn is not None:
+            yield self._batch_conn
+        else:
+            with self.engine.connect() as conn:
+                yield conn
+
     @log_call
     def __init__(
         self,
         engine: Engine | None = None,
         non_support_request_types: Iterable[str] | None = None,
+        support_issue_types: Iterable[str] | None = None,
+        request_type_categories: CategoryRules | None = None,
+        request_type_category_default: str | None = DEFAULT_REQUEST_TYPE_CATEGORY,
+        closed_statuses: Iterable[str] | None = None,
+        cancelled_statuses: Iterable[str] | None = None,
+        no_contact_ignore_statuses: Iterable[str] | None = None,
+        aged_days_short: int = DEFAULT_AGED_DAYS_SHORT,
+        aged_days_long: int = DEFAULT_AGED_DAYS_LONG,
+        no_contact_days: int = DEFAULT_NO_CONTACT_DAYS,
     ):
         if engine is None:
             engine = create_engine("sqlite+pysqlite:///support_stats.sqlite")
@@ -803,6 +1132,38 @@ class DatabaseStore:
             self.non_support_request_types = [
                 str(value) for value in non_support_request_types
             ]
+        if support_issue_types is None:
+            self.support_issue_types = DEFAULT_SUPPORT_ISSUE_TYPES.copy()
+        else:
+            self.support_issue_types = [str(value) for value in support_issue_types]
+        # None = one category per issue type, resolved when the views are created
+        self.request_type_categories = normalize_category_rules(request_type_categories)
+        self.request_type_category_default = request_type_category_default
+        self.closed_statuses = [
+            str(value)
+            for value in (
+                DEFAULT_CLOSED_STATUSES if closed_statuses is None else closed_statuses
+            )
+        ]
+        self.cancelled_statuses = [
+            str(value)
+            for value in (
+                DEFAULT_CANCELLED_STATUSES
+                if cancelled_statuses is None
+                else cancelled_statuses
+            )
+        ]
+        self.no_contact_ignore_statuses = [
+            str(value)
+            for value in (
+                DEFAULT_NO_CONTACT_IGNORE_STATUSES
+                if no_contact_ignore_statuses is None
+                else no_contact_ignore_statuses
+            )
+        ]
+        self.aged_days_short = int(aged_days_short)
+        self.aged_days_long = int(aged_days_long)
+        self.no_contact_days = int(no_contact_days)
         self._prepare_schema()
 
     def _drop_view_if_exists(self, conn, view_name: str) -> None:
@@ -896,6 +1257,7 @@ class DatabaseStore:
             Column("from_string", String),
             Column("to_value", String),
             Column("to_string", String),
+            Column("internal_user", Boolean),
         )
         self.jira_calendar = Table(
             "jira_calendar",
@@ -906,12 +1268,12 @@ class DatabaseStore:
             Column("date", DateTime),
             Column("comments", Integer),
             Column("public_comments", Integer),
-            Column("start_assigned_group", String),
-            Column("end_assigned_group", String),
             Column("start_assigned_user", String),
             Column("end_assigned_user", String),
             Column("start_assigned_user_email", String),
             Column("end_assigned_user_email", String),
+            Column("start_assigned_group", String),
+            Column("end_assigned_group", String),
             Column("start_request_type", String),
             Column("end_request_type", String),
             Column("start_issuetype", String),
@@ -936,44 +1298,18 @@ class DatabaseStore:
             Column("weekday", Integer),
             Column("date_modified", DateTime),
         )
-        self.resolution_reports = Table(
-            "resolution_reports",
-            self.meta,
-            Column("ticket_id", String, ForeignKey("jira_tickets.id"), primary_key=True),
-            Column("issue_key", String),
-            Column("resolvers_raw", Text),
-            Column("primary_resolver", String),
-            Column("resolve_helpers", Text),
-            Column("escalated_to_level", Integer),
-            Column("solved_level", Integer),
-            Column("outcome", String),
-            Column("category", String),
-            Column("new_category", String),
-            Column("summary_block", Text),
-            Column("rationale", Text),
-            Column("updated_at", DateTime),
-        )
-        self.resolution_resolvers = Table(
-            "resolution_resolvers",
-            self.meta,
-            Column("id", Integer, primary_key=True),
-            Column("ticket_id", String, ForeignKey("resolution_reports.ticket_id")),
-            Column("resolver", String),
-            Column("resolver_index", Integer),
-            Column("resolver_level", Integer),
-        )
-        self.resolver_aliases = Table(
-            "resolver_aliases",
-            self.meta,
-            Column("alias", String, primary_key=True),
-            Column("canonical_name", String),
-            Column("level", Integer),
-            Column("priority", Integer),
-        )
         self.internal_users = Table(
             "internal_users",
             self.meta,
             Column("pattern", String, primary_key=True),
+        )
+        # members of the internal_groups, refreshed from Jira on every run
+        self.internal_group_members = Table(
+            "internal_group_members",
+            self.meta,
+            Column("group_name", String, primary_key=True),
+            Column("account_id", String, primary_key=True),
+            Column("display_name", String),
         )
         self.org_lookup = Table(
             "org_lookup",
@@ -990,100 +1326,171 @@ class DatabaseStore:
             Column("reporting_quarter", String),
         )
         self.meta.create_all(self.engine)
-        self._seed_resolver_aliases()
-        self._drop_resolution_report_columns()
-
-        # populate week to reporting month/quarter lookup
+        # per-ticket lookups (loading a ticket, replacing its calendar) would
+        # otherwise scan the whole table; also added to existing databases
         with self.engine.begin() as conn:
-            count = conn.execute(select(func.count()).select_from(self.week_reporting)).scalar()
-            if count == 0:
-                rows = []
-                for week in range(1, 53):
-                    if week <= 5:
-                        month = 1
-                    elif week <= 9:
-                        month = 2
-                    elif week <= 13:
-                        month = 3
-                    elif week <= 17:
-                        month = 4
-                    elif week <= 22:
-                        month = 5
-                    elif week <= 26:
-                        month = 6
-                    elif week <= 31:
-                        month = 7
-                    elif week <= 35:
-                        month = 8
-                    elif week <= 39:
-                        month = 9
-                    elif week <= 44:
-                        month = 10
-                    elif week <= 48:
-                        month = 11
-                    else:
-                        month = 12
-                    quarter = (month - 1) // 3 + 1
-                    rows.append(
-                        {
-                            "calendar_week": f"2025.{week:02}",
-                            "reporting_month": f"2025.{month:02}",
-                            "reporting_quarter": f"2025.Q{quarter}",
-                        }
-                    )
-                conn.execute(self.week_reporting.insert(), rows)
+            for table in ("jira_comments", "jira_worklogs", "jira_changelog", "jira_calendar"):
+                conn.execute(
+                    text(f"CREATE INDEX IF NOT EXISTS ix_{table}_ticket_id ON {table} (ticket_id)")
+                )
 
-    def _seed_resolver_aliases(self) -> None:
-        """Populate resolver_aliases table with default values when empty."""
-        with self.engine.begin() as conn:
-            count = conn.execute(
-                select(func.count()).select_from(self.resolver_aliases)
-            ).scalar()
-            if count:
-                return
-            rows = []
-            for priority, (alias, real, level) in enumerate(DEFAULT_RESOLVER_ALIASES):
+        # week to reporting month/quarter lookup, covering every year from the
+        # oldest stored ticket to the current year; extended by insert_many
+        self._reporting_years: set[int] = set()
+        current_year = datetime.date.today().isocalendar().year
+        first_year = min(self._first_data_year() or current_year, current_year)
+        self._seed_week_reporting(range(first_year, current_year + 1))
+
+        self._create_views()
+
+    def _first_data_year(self) -> int | None:
+        """Return the year of the oldest stored ticket or calendar day."""
+        with self.engine.connect() as conn:
+            values = [
+                conn.execute(select(func.min(self.jira_tickets.c.created))).scalar(),
+                conn.execute(select(func.min(self.jira_calendar.c.date))).scalar(),
+            ]
+        years = [int(str(v)[:4]) for v in values if v]
+        return min(years) if years else None
+
+    def _seed_week_reporting(self, years: Iterable[int]) -> None:
+        """Add week_reporting rows for the given years; existing rows are kept."""
+        years = [y for y in years if y not in self._reporting_years]
+        if not years:
+            return
+        rows = []
+        for year in years:
+            weeks_in_year = datetime.date(year, 12, 28).isocalendar().week
+            for week in range(1, weeks_in_year + 1):
+                if week <= 5:
+                    month = 1
+                elif week <= 9:
+                    month = 2
+                elif week <= 13:
+                    month = 3
+                elif week <= 17:
+                    month = 4
+                elif week <= 22:
+                    month = 5
+                elif week <= 26:
+                    month = 6
+                elif week <= 31:
+                    month = 7
+                elif week <= 35:
+                    month = 8
+                elif week <= 39:
+                    month = 9
+                elif week <= 44:
+                    month = 10
+                elif week <= 48:
+                    month = 11
+                else:
+                    month = 12
+                quarter = (month - 1) // 3 + 1
                 rows.append(
                     {
-                        "alias": alias,
-                        "canonical_name": real,
-                        "level": level,
-                        "priority": priority,
+                        "calendar_week": f"{year}.{week:02}",
+                        "reporting_month": f"{year}.{month:02}",
+                        "reporting_quarter": f"{year}.Q{quarter}",
                     }
                 )
-            conn.execute(self.resolver_aliases.insert(), rows)
+        with self._begin() as conn:
+            conn.execute(self.week_reporting.insert().prefix_with("OR IGNORE"), rows)
+        self._reporting_years.update(years)
 
-    def _drop_resolution_report_columns(self) -> None:
-        """Drop legacy columns that duplicate jira_tickets fields."""
-        inspector = sa_inspect(self.engine)
-        if "resolution_reports" not in inspector.get_table_names():
-            return
-        cols = [c["name"] for c in inspector.get_columns("resolution_reports")]
-        to_drop = {
-            "summary",
-            "status",
-            "issuetype",
-            "priority",
-            "request_type",
-            "organizations",
-            "work_category",
-        }
-        for col in sorted(to_drop):
-            if col in cols:
-                with self.engine.begin() as conn:
-                    try:
-                        conn.execute(text(f"ALTER TABLE resolution_reports DROP COLUMN {col}"))
-                    except Exception:
-                        logging.getLogger(__name__).warning(
-                            "Failed to drop column %s from resolution_reports", col
-                        )
+    def _category_issue_types(self) -> list[str]:
+        """Issue types that get a category when no categories are configured."""
+        if self.support_issue_types:
+            return list(dict.fromkeys(self.support_issue_types))
+        with self.engine.connect() as conn:
+            return list(
+                conn.execute(
+                    select(self.jira_tickets.c.issuetype)
+                    .where(self.jira_tickets.c.issuetype.is_not(None))
+                    .distinct()
+                    .order_by(self.jira_tickets.c.issuetype)
+                ).scalars()
+            )
 
+    def _create_views(self) -> None:
+        """Create the reporting views and add columns missing in older databases."""
         with self.engine.begin() as conn:
             self._drop_view_if_exists(conn, "reporting_weeks")
             conn.execute(text("CREATE VIEW reporting_weeks AS SELECT * FROM week_reporting"))
 
-        is_junk_expr = "CASE WHEN LOWER(jt.status) = 'cancelled' THEN 1 ELSE 0 END"
-        request_type_expr = "CASE WHEN jt.request_type LIKE '%Hardware%' THEN 'HW' ELSE 'SW' END"
+        def sql_str(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        def sql_status_list(statuses: Iterable[str]) -> str:
+            # lower-cased for comparison with LOWER(status); SQLite accepts an empty list
+            return ", ".join(sql_str(s.lower()) for s in statuses)
+
+        cancelled = sql_status_list(self.cancelled_statuses)
+        closed_statuses = sql_status_list(self.closed_statuses)
+
+        def not_cancelled(status_col: str) -> str:
+            return f"LOWER(COALESCE({status_col}, '')) NOT IN ({cancelled})"
+
+        is_junk_expr = f"CASE WHEN LOWER(jt.status) IN ({cancelled}) THEN 1 ELSE 0 END"
+
+        def category_condition(pattern: Mapping[str, str]) -> str:
+            # the patterns of a rule are AND-connected; labels are stored
+            # comma-separated, so "any label contains x" is labels LIKE %x%
+            return " AND ".join(
+                f"jt.labels LIKE {sql_str('%' + value + '%')}"
+                if key == "label"
+                else f"jt.{CATEGORY_PATTERN_COLUMNS[key]} LIKE {sql_str(value)}"
+                for key, value in pattern.items()
+            )
+
+        request_type_categories = self.request_type_categories
+        if request_type_categories is None:
+            request_type_categories = {
+                issuetype: [{"issue_type": issuetype}]
+                for issuetype in self._category_issue_types()
+            }
+        categories, category_rules = category_rule_list(request_type_categories)
+        when_clauses = [
+            f"WHEN {category_condition(pattern)} THEN {sql_str(category)}"
+            for category, pattern in category_rules
+        ]
+        default_category = (
+            sql_str(self.request_type_category_default)
+            if self.request_type_category_default
+            else "NULL"
+        )
+        if when_clauses:
+            request_type_expr = (
+                "CASE " + " ".join(when_clauses) + f" ELSE {default_category} END"
+            )
+        else:
+            request_type_expr = default_category
+
+        # one open_<category> / closed_<category> column per category
+        if (
+            self.request_type_category_default
+            and self.request_type_category_default not in categories
+        ):
+            categories.append(self.request_type_category_default)
+        category_cols = [
+            (sql_str(category), re.sub(r"\W+", "_", category.lower()).strip("_"))
+            for category in categories
+        ]
+        active_category_cols = "".join(
+            f",\n                        COUNT(DISTINCT CASE WHEN request_type_category = {value} THEN id END) AS open_{suffix}"
+            for value, suffix in category_cols
+        )
+        closed_category_cols = "".join(
+            f"                        COUNT(DISTINCT CASE WHEN request_type_category = {value} THEN id END) AS closed_{suffix},\n"
+            for value, suffix in category_cols
+        )
+        summary_category_cols = "".join(
+            f"                COALESCE(active.open_{suffix}, 0) AS open_{suffix},\n"
+            for _, suffix in category_cols
+        ) + "".join(
+            f"                COALESCE(closed.closed_{suffix}, 0) AS closed_{suffix},\n"
+            for _, suffix in category_cols
+        )
         if self.non_support_request_types:
             excluded_values = ", ".join(
                 "'" + value.replace("'", "''") + "'"
@@ -1122,27 +1529,36 @@ class DatabaseStore:
             reporting_request_type_filter = ""
             active_request_type_filter = ""
 
-        calendar_support_filter = (
-            " AND LOWER(COALESCE(jt.issuetype, jc.end_issuetype, jc.start_issuetype, '')) = 'support'"
-        )
-        tickets_support_filter = " AND LOWER(COALESCE(jt.issuetype, '')) = 'support'"
-        reporting_support_filter = " AND LOWER(COALESCE(jtr.issuetype, '')) = 'support'"
-        active_support_filter = " AND LOWER(COALESCE(jtaw.issuetype, '')) = 'support'"
+        if self.support_issue_types:
+            issue_type_values = ", ".join(
+                "'" + value.lower().replace("'", "''") + "'"
+                for value in self.support_issue_types
+            )
+            calendar_support_filter = (
+                " AND LOWER(COALESCE(jt.issuetype, jc.end_issuetype, jc.start_issuetype, '')) IN ("
+                + issue_type_values
+                + ")"
+            )
+            tickets_support_filter = (
+                " AND LOWER(COALESCE(jt.issuetype, '')) IN (" + issue_type_values + ")"
+            )
+            reporting_support_filter = (
+                " AND LOWER(COALESCE(jtr.issuetype, '')) IN (" + issue_type_values + ")"
+            )
+            active_support_filter = (
+                " AND LOWER(COALESCE(jtaw.issuetype, '')) IN (" + issue_type_values + ")"
+            )
+        else:
+            calendar_support_filter = ""
+            tickets_support_filter = ""
+            reporting_support_filter = ""
+            active_support_filter = ""
 
         # create a view exposing reporting month and quarter columns
         view_sql = f"""
             CREATE VIEW jira_tickets_reporting AS
             SELECT
                 jt.*,
-                rr.primary_resolver,
-                rr.resolve_helpers,
-                rr.escalated_to_level,
-                rr.solved_level,
-                rr.outcome,
-                rr.category,
-                rr.new_category,
-                rr.summary_block,
-                rr.rationale,
                 {is_junk_expr} AS is_junk,
                 {request_type_expr} AS request_type_category,
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.created_week) AS created_reportingmonth,
@@ -1156,7 +1572,6 @@ class DatabaseStore:
                 (SELECT reporting_month FROM week_reporting WHERE calendar_week = jt.last_response_date_week) AS last_response_date_reportingmonth,
                 (SELECT reporting_quarter FROM week_reporting WHERE calendar_week = jt.last_response_date_week) AS last_response_date_reportingquarter
             FROM jira_tickets jt
-            LEFT JOIN resolution_reports rr ON rr.ticket_id = jt.id
         """
         with self.engine.begin() as conn:
             self._drop_view_if_exists(conn, "jira_tickets_reporting")
@@ -1187,12 +1602,12 @@ class DatabaseStore:
                 jc.date,
                 jc.comments,
                 jc.public_comments,
-                jc.start_assigned_group,
-                jc.end_assigned_group,
                 jc.start_assigned_user,
                 jc.end_assigned_user,
                 jc.start_assigned_user_email,
                 jc.end_assigned_user_email,
+                jc.start_assigned_group,
+                jc.end_assigned_group,
                 jc.start_request_type,
                 jc.end_request_type,
                 jc.start_issuetype,
@@ -1257,7 +1672,177 @@ class DatabaseStore:
             self._drop_view_if_exists(conn, "jira_tickets_worklogs")
             conn.execute(text(ticket_worklogs_view_sql))
 
-        statuses = ",".join(f"'{s.lower()}'" for s in NO_CONTACT_IGNORE_STATUSES)
+        # per customer, week and request type category, counted like the summary views
+        customer_view_sql = f"""
+            CREATE VIEW customer_weekly_summary AS
+            WITH
+                support_tickets AS (
+                    SELECT
+                        jt.id,
+                        jt.created_week,
+                        jt.resolved_week,
+                        COALESCE(NULLIF(jt.primary_organization, ''), '(none)') AS organization,
+                        COALESCE({request_type_expr}, '(none)') AS request_type_category
+                    FROM jira_tickets jt
+                    WHERE {not_cancelled("jt.status")}
+                      {tickets_request_type_filter}
+                      {tickets_support_filter}
+                ),
+                created AS (
+                    SELECT created_week AS week, organization, request_type_category,
+                           COUNT(*) AS new_tickets
+                    FROM support_tickets
+                    GROUP BY created_week, organization, request_type_category
+                ),
+                resolved AS (
+                    SELECT resolved_week AS week, organization, request_type_category,
+                           COUNT(*) AS closed_tickets
+                    FROM support_tickets
+                    WHERE resolved_week IS NOT NULL
+                    GROUP BY resolved_week, organization, request_type_category
+                ),
+                logged AS (
+                    SELECT jw.started_week AS week, st.organization, st.request_type_category,
+                           SUM(jw.time_spent_minutes) / 60.0 AS hours_logged
+                    FROM jira_worklogs jw
+                    JOIN support_tickets st ON st.id = jw.ticket_id
+                    GROUP BY jw.started_week, st.organization, st.request_type_category
+                ),
+                keys AS (
+                    SELECT week, organization, request_type_category FROM created
+                    UNION SELECT week, organization, request_type_category FROM resolved
+                    UNION SELECT week, organization, request_type_category FROM logged
+                )
+            SELECT
+                k.week,
+                wr.reporting_month AS month,
+                wr.reporting_quarter AS quarter,
+                k.organization,
+                k.request_type_category,
+                COALESCE(c.new_tickets, 0) AS new_tickets,
+                COALESCE(r.closed_tickets, 0) AS closed_tickets,
+                COALESCE(l.hours_logged, 0) AS hours_logged
+            FROM keys k
+            JOIN week_reporting wr ON wr.calendar_week = k.week
+            LEFT JOIN created c USING (week, organization, request_type_category)
+            LEFT JOIN resolved r USING (week, organization, request_type_category)
+            LEFT JOIN logged l USING (week, organization, request_type_category)
+            ORDER BY k.week, k.organization, k.request_type_category
+        """
+        with self.engine.begin() as conn:
+            self._drop_view_if_exists(conn, "customer_weekly_summary")
+            conn.execute(text(customer_view_sql))
+
+        # the tickets behind high_or_critical_tickets and escalated_tickets, to
+        # follow up on: one row per ticket and ISO week, with the same filters
+        is_escalation = "(jc.did_escalate_priority = 1 AND jc.end_priority_pos > jc.start_priority_pos)"
+        priority_view_sql = f"""
+            CREATE VIEW priority_tickets AS
+            WITH flagged AS (
+                SELECT
+                    jc.ticket_id,
+                    jc.cw AS week,
+                    MAX(CASE WHEN jc.end_priority_pos > 0 THEN 1 ELSE 0 END) AS high_priority,
+                    MAX(CASE WHEN {is_escalation} THEN 1 ELSE 0 END) AS escalated,
+                    MIN(CASE WHEN {is_escalation} THEN jc.date END) AS escalated_on,
+                    MAX(jc.end_priority_pos) AS top_priority_pos
+                FROM jira_calendar jc
+                JOIN jira_tickets jt ON jt.id = jc.ticket_id
+                WHERE (jc.end_priority_pos > 0 OR {is_escalation})
+                  AND {not_cancelled("jt.status")}
+                  AND jc.is_junk != 1
+                  {calendar_request_type_filter}
+                  {calendar_support_filter}
+                GROUP BY jc.ticket_id, jc.cw
+            )
+            SELECT
+                f.week,
+                wr.reporting_month AS month,
+                wr.reporting_quarter AS quarter,
+                jt.key AS ticket_key,
+                jt.summary,
+                COALESCE(NULLIF(jt.primary_organization, ''), '(none)') AS organization,
+                {request_type_expr} AS request_type_category,
+                jt.request_type,
+                f.high_priority,
+                f.escalated,
+                DATE(f.escalated_on) AS escalated_on,
+                (
+                    SELECT jc2.end_priority_txt
+                    FROM jira_calendar jc2
+                    WHERE jc2.ticket_id = f.ticket_id AND jc2.cw = f.week
+                    ORDER BY jc2.end_priority_pos DESC, jc2.date DESC
+                    LIMIT 1
+                ) AS week_priority,
+                jt.priority AS current_priority,
+                jt.status AS current_status,
+                jt.assignee AS current_assignee,
+                DATE(jt.created) AS created,
+                DATE(jt.resolved) AS resolved
+            FROM flagged f
+            JOIN jira_tickets jt ON jt.id = f.ticket_id
+            JOIN week_reporting wr ON wr.calendar_week = f.week
+            ORDER BY f.week DESC, f.escalated DESC, f.top_priority_pos DESC, jt.key
+        """
+        with self.engine.begin() as conn:
+            self._drop_view_if_exists(conn, "priority_tickets")
+            conn.execute(text(priority_view_sql))
+
+        # per internal user and ISO week: tickets worked on, split by kind of action.
+        # Comments and changelog entries (one per history entry, so a status change
+        # that also sets the resolution counts once). Changelog rows stored before
+        # the internal_user column existed fall back to the internal comment authors.
+        agent_view_sql = """
+            CREATE VIEW agent_weekly_activity AS
+            WITH
+                internal_names AS (
+                    SELECT DISTINCT author FROM jira_comments
+                    WHERE internal_user = 1 AND author IS NOT NULL
+                ),
+                actions AS (
+                    SELECT strftime('%G.%V', created) AS week, author, author_email,
+                           ticket_id, 'comment' AS kind, id AS action_id, public
+                    FROM jira_comments
+                    WHERE internal_user = 1
+                    UNION ALL
+                    SELECT strftime('%G.%V', created), author, author_email, ticket_id,
+                           CASE
+                               WHEN LOWER(field) IN ('status', 'resolution') THEN 'status'
+                               WHEN LOWER(field) = 'assignee' THEN 'assignment'
+                               ELSE 'other'
+                           END,
+                           history_id, NULL
+                    FROM jira_changelog
+                    WHERE COALESCE(
+                        internal_user, author IN (SELECT author FROM internal_names)
+                    ) = 1
+                )
+            SELECT
+                a.week,
+                wr.reporting_month AS month,
+                wr.reporting_quarter AS quarter,
+                a.author AS agent,
+                MAX(a.author_email) AS agent_email,
+                COUNT(DISTINCT a.ticket_id) AS tickets_total,
+                COUNT(DISTINCT CASE WHEN kind = 'comment' THEN ticket_id END) AS tickets_commented,
+                COUNT(DISTINCT CASE WHEN kind = 'status' THEN ticket_id END) AS tickets_status_changed,
+                COUNT(DISTINCT CASE WHEN kind = 'assignment' THEN ticket_id END) AS tickets_assignment_changed,
+                COUNT(DISTINCT CASE WHEN kind = 'other' THEN ticket_id END) AS tickets_other_changes,
+                COUNT(DISTINCT CASE WHEN kind = 'comment' THEN action_id END) AS comments,
+                COUNT(DISTINCT CASE WHEN kind = 'comment' AND public = 1 THEN action_id END) AS public_comments,
+                COUNT(DISTINCT CASE WHEN kind = 'status' THEN action_id END) AS status_changes,
+                COUNT(DISTINCT CASE WHEN kind = 'assignment' THEN action_id END) AS assignment_changes,
+                COUNT(DISTINCT CASE WHEN kind = 'other' THEN action_id END) AS other_changes
+            FROM actions a
+            JOIN week_reporting wr ON wr.calendar_week = a.week
+            GROUP BY a.week, a.author
+            ORDER BY a.week, a.author
+        """
+        with self.engine.begin() as conn:
+            self._drop_view_if_exists(conn, "agent_weekly_activity")
+            conn.execute(text(agent_view_sql))
+
+        statuses = sql_status_list(self.no_contact_ignore_statuses)
 
         summary_view_template = """
             CREATE VIEW {view_name} AS
@@ -1265,13 +1850,10 @@ class DatabaseStore:
                 active AS (
                     SELECT
                         wr.{period_col} AS period,
-                        COUNT(DISTINCT id) AS ongoing,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'SW' THEN id END) AS open_sw,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS open_dis,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS open_hw
+                        COUNT(DISTINCT id) AS ongoing{active_category_cols}
                     FROM jira_tickets_active_weeks jtaw
                     JOIN week_reporting wr ON wr.calendar_week = active_week
-                    WHERE COALESCE(status, '') != 'Cancelled'
+                    WHERE {not_cancelled_jtaw}
                       {active_request_type_filter}
                       {active_support_filter}
                     GROUP BY wr.{period_col}
@@ -1281,18 +1863,18 @@ class DatabaseStore:
                         jc.cw AS cw,
                         COUNT(DISTINCT jc.ticket_id) AS overall_open,
                         COUNT(DISTINCT CASE
-                            WHEN jc.total_days_open > 5 THEN jc.ticket_id
+                            WHEN jc.total_days_open > {aged_days_short} THEN jc.ticket_id
                         END) AS aged_5,
                         COUNT(DISTINCT CASE
-                            WHEN jc.total_days_open > 30 THEN jc.ticket_id
+                            WHEN jc.total_days_open > {aged_days_long} THEN jc.ticket_id
                         END) AS aged_30,
                         COUNT(DISTINCT CASE WHEN jc.end_assigned_user IS NULL OR jc.end_assigned_user = '' THEN jc.ticket_id END) AS unassigned,
-                        COUNT(DISTINCT CASE WHEN LOWER(jc.end_status) NOT IN ({statuses}) AND jc.weekdays_days_since_last_contact > 5 THEN jc.ticket_id END) AS over5_no_contact
+                        COUNT(DISTINCT CASE WHEN LOWER(jc.end_status) NOT IN ({statuses}) AND jc.weekdays_days_since_last_contact > {no_contact_days} THEN jc.ticket_id END) AS over5_no_contact
                     FROM jira_calendar jc
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
                     WHERE jc.weekday = 5
-                      AND LOWER(jc.end_status) NOT IN ('resolved','closed','cancelled')
-                      AND COALESCE(jt.status, '') != 'Cancelled'
+                      AND LOWER(jc.end_status) NOT IN ({closed_statuses})
+                      AND {not_cancelled_jt}
                       AND jc.is_junk != 1
                       {calendar_request_type_filter}
                       {calendar_support_filter}
@@ -1316,7 +1898,7 @@ class DatabaseStore:
                     JOIN jira_tickets jt ON jt.id = jc.ticket_id
                     JOIN week_reporting wr ON wr.calendar_week = jc.cw
                     WHERE jc.end_priority_pos > 0
-                      AND COALESCE(jt.status, '') != 'Cancelled'
+                      AND {not_cancelled_jt}
                       AND jc.is_junk != 1
                       {calendar_request_type_filter}
                       {calendar_support_filter}
@@ -1329,7 +1911,7 @@ class DatabaseStore:
                     JOIN week_reporting wr ON wr.calendar_week = jc.cw
                     WHERE jc.did_escalate_priority = 1
                       AND jc.end_priority_pos > jc.start_priority_pos
-                      AND COALESCE(jt.status, '') != 'Cancelled'
+                      AND {not_cancelled_jt}
                       AND jc.is_junk != 1
                       {calendar_request_type_filter}
                       {calendar_support_filter}
@@ -1339,7 +1921,7 @@ class DatabaseStore:
                     SELECT wr.{period_col} AS period, COUNT(*) AS new_tickets
                     FROM jira_tickets jt
                     JOIN week_reporting wr ON wr.calendar_week = jt.created_week
-                    WHERE COALESCE(jt.status, '') != 'Cancelled'
+                    WHERE {not_cancelled_jt}
                       {tickets_request_type_filter}
                       {tickets_support_filter}
                     GROUP BY wr.{period_col}
@@ -1348,10 +1930,7 @@ class DatabaseStore:
                     SELECT
                         wr.{period_col} AS period,
                         COUNT(*) AS closed_tickets,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'SW' THEN id END) AS closed_sw,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'DIS' THEN id END) AS closed_dis,
-                        COUNT(DISTINCT CASE WHEN request_type_category = 'HW' THEN id END) AS closed_hw,
-                        AVG(resolution_time_days) AS avg_resolution_days,
+{closed_category_cols}                        AVG(resolution_time_days) AS avg_resolution_days,
                         AVG(CAST(satisfaction AS REAL)) AS csat_score,
                         COUNT(satisfaction) AS csat_answers,
                         COUNT(CASE WHEN satisfaction = '1' THEN 1 END) AS csat_1,
@@ -1362,43 +1941,7 @@ class DatabaseStore:
                     FROM jira_tickets_reporting jtr
                     JOIN week_reporting wr ON wr.calendar_week = jtr.resolved_week
                     WHERE jtr.resolved_week IS NOT NULL
-                      AND COALESCE(jtr.status, '') != 'Cancelled'
-                      {reporting_request_type_filter}
-                      {reporting_support_filter}
-                    GROUP BY wr.{period_col}
-                ),
-                resolution_report_stats AS (
-                    SELECT
-                        wr.{period_col} AS period,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level IN (1, 2, 3) THEN jtr.id END) AS rr_solved_total,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level IN (1, 2, 3) AND request_type_category = 'HW' THEN jtr.id END) AS rr_solved_hw_total,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level IN (1, 2, 3) AND request_type_category = 'SW' THEN jtr.id END) AS rr_solved_sw_total,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level IN (1, 2, 3) THEN jtr.id END) AS rr_escalated_total,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level IN (1, 2, 3) AND request_type_category = 'HW' THEN jtr.id END) AS rr_escalated_hw_total,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level IN (1, 2, 3) AND request_type_category = 'SW' THEN jtr.id END) AS rr_escalated_sw_total,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 1 THEN jtr.id END) AS solved_level1,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 2 THEN jtr.id END) AS solved_level2,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 3 THEN jtr.id END) AS solved_level3,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 1 AND request_type_category = 'HW' THEN jtr.id END) AS solved_level1_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 2 AND request_type_category = 'HW' THEN jtr.id END) AS solved_level2_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 3 AND request_type_category = 'HW' THEN jtr.id END) AS solved_level3_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 1 AND request_type_category = 'SW' THEN jtr.id END) AS solved_level1_sw,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 2 AND request_type_category = 'SW' THEN jtr.id END) AS solved_level2_sw,
-                        COUNT(DISTINCT CASE WHEN jtr.solved_level = 3 AND request_type_category = 'SW' THEN jtr.id END) AS solved_level3_sw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 1 THEN jtr.id END) AS escalated_level1,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 2 THEN jtr.id END) AS escalated_level2,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 3 THEN jtr.id END) AS escalated_level3,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 1 AND request_type_category = 'HW' THEN jtr.id END) AS escalated_level1_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 2 AND request_type_category = 'HW' THEN jtr.id END) AS escalated_level2_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 3 AND request_type_category = 'HW' THEN jtr.id END) AS escalated_level3_hw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 1 AND request_type_category = 'SW' THEN jtr.id END) AS escalated_level1_sw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 2 AND request_type_category = 'SW' THEN jtr.id END) AS escalated_level2_sw,
-                        COUNT(DISTINCT CASE WHEN jtr.escalated_to_level = 3 AND request_type_category = 'SW' THEN jtr.id END) AS escalated_level3_sw
-                    FROM jira_tickets_reporting jtr
-                    JOIN week_reporting wr ON wr.calendar_week = jtr.resolved_week
-                    WHERE jtr.resolved_week IS NOT NULL
-                      AND COALESCE(jtr.status, '') != 'Cancelled'
-                      AND jtr.summary_block IS NOT NULL
+                      AND {not_cancelled_jtr}
                       {reporting_request_type_filter}
                       {reporting_support_filter}
                     GROUP BY wr.{period_col}
@@ -1414,7 +1957,7 @@ class DatabaseStore:
                         FROM jira_tickets jt
                         JOIN week_reporting wr ON wr.calendar_week = jt.first_response_date_week
                         WHERE jt.first_response_time_minutes IS NOT NULL
-                          AND COALESCE(jt.status, '') != 'Cancelled'
+                          AND {not_cancelled_jt}
                           {tickets_request_type_filter}
                           {tickets_support_filter}
                     ) t
@@ -1441,67 +1984,7 @@ class DatabaseStore:
                 COALESCE(closed.csat_3, 0) AS csat_3,
                 COALESCE(closed.csat_4, 0) AS csat_4,
                 COALESCE(closed.csat_5, 0) AS csat_5,
-                COALESCE(active.open_sw, 0) AS open_sw,
-                COALESCE(active.open_dis, 0) AS open_dis,
-                COALESCE(active.open_hw, 0) AS open_hw,
-                COALESCE(closed.closed_sw, 0) AS closed_sw,
-                COALESCE(closed.closed_dis, 0) AS closed_dis,
-                COALESCE(closed.closed_hw, 0) AS closed_hw,
-                CASE WHEN resolution_report_stats.rr_solved_total IS NULL OR resolution_report_stats.rr_solved_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level1 / resolution_report_stats.rr_solved_total, 2)
-                END AS solved_in_level1,
-                CASE WHEN resolution_report_stats.rr_solved_total IS NULL OR resolution_report_stats.rr_solved_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level2 / resolution_report_stats.rr_solved_total, 2)
-                END AS solved_in_level2,
-                CASE WHEN resolution_report_stats.rr_solved_total IS NULL OR resolution_report_stats.rr_solved_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level3 / resolution_report_stats.rr_solved_total, 2)
-                END AS solved_in_level3,
-                CASE WHEN resolution_report_stats.rr_solved_hw_total IS NULL OR resolution_report_stats.rr_solved_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level1_hw / resolution_report_stats.rr_solved_hw_total, 2)
-                END AS solved_in_level1_hw,
-                CASE WHEN resolution_report_stats.rr_solved_hw_total IS NULL OR resolution_report_stats.rr_solved_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level2_hw / resolution_report_stats.rr_solved_hw_total, 2)
-                END AS solved_in_level2_hw,
-                CASE WHEN resolution_report_stats.rr_solved_hw_total IS NULL OR resolution_report_stats.rr_solved_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level3_hw / resolution_report_stats.rr_solved_hw_total, 2)
-                END AS solved_in_level3_hw,
-                CASE WHEN resolution_report_stats.rr_solved_sw_total IS NULL OR resolution_report_stats.rr_solved_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level1_sw / resolution_report_stats.rr_solved_sw_total, 2)
-                END AS solved_in_level1_sw,
-                CASE WHEN resolution_report_stats.rr_solved_sw_total IS NULL OR resolution_report_stats.rr_solved_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level2_sw / resolution_report_stats.rr_solved_sw_total, 2)
-                END AS solved_in_level2_sw,
-                CASE WHEN resolution_report_stats.rr_solved_sw_total IS NULL OR resolution_report_stats.rr_solved_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.solved_level3_sw / resolution_report_stats.rr_solved_sw_total, 2)
-                END AS solved_in_level3_sw,
-                CASE WHEN resolution_report_stats.rr_escalated_total IS NULL OR resolution_report_stats.rr_escalated_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level1 / resolution_report_stats.rr_escalated_total, 2)
-                END AS escalated_to_level1,
-                CASE WHEN resolution_report_stats.rr_escalated_total IS NULL OR resolution_report_stats.rr_escalated_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level2 / resolution_report_stats.rr_escalated_total, 2)
-                END AS escalated_to_level2,
-                CASE WHEN resolution_report_stats.rr_escalated_total IS NULL OR resolution_report_stats.rr_escalated_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level3 / resolution_report_stats.rr_escalated_total, 2)
-                END AS escalated_to_level3,
-                CASE WHEN resolution_report_stats.rr_escalated_hw_total IS NULL OR resolution_report_stats.rr_escalated_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level1_hw / resolution_report_stats.rr_escalated_hw_total, 2)
-                END AS escalated_to_level1_hw,
-                CASE WHEN resolution_report_stats.rr_escalated_hw_total IS NULL OR resolution_report_stats.rr_escalated_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level2_hw / resolution_report_stats.rr_escalated_hw_total, 2)
-                END AS escalated_to_level2_hw,
-                CASE WHEN resolution_report_stats.rr_escalated_hw_total IS NULL OR resolution_report_stats.rr_escalated_hw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level3_hw / resolution_report_stats.rr_escalated_hw_total, 2)
-                END AS escalated_to_level3_hw,
-                CASE WHEN resolution_report_stats.rr_escalated_sw_total IS NULL OR resolution_report_stats.rr_escalated_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level1_sw / resolution_report_stats.rr_escalated_sw_total, 2)
-                END AS escalated_to_level1_sw,
-                CASE WHEN resolution_report_stats.rr_escalated_sw_total IS NULL OR resolution_report_stats.rr_escalated_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level2_sw / resolution_report_stats.rr_escalated_sw_total, 2)
-                END AS escalated_to_level2_sw,
-                CASE WHEN resolution_report_stats.rr_escalated_sw_total IS NULL OR resolution_report_stats.rr_escalated_sw_total = 0 THEN NULL
-                     ELSE ROUND(1.0 * resolution_report_stats.escalated_level3_sw / resolution_report_stats.rr_escalated_sw_total, 2)
-                END AS escalated_to_level3_sw,
-                COALESCE(friday.aged_30, 0) AS aged_30_plus,
+{summary_category_cols}                COALESCE(friday.aged_30, 0) AS aged_30_plus,
                 COALESCE(friday.aged_5, 0) AS aged_5_plus,
                 COALESCE(friday.overall_open, 0) AS overall_open,
                 COALESCE(friday.unassigned, 0) AS unassigned,
@@ -1513,7 +1996,6 @@ class DatabaseStore:
             LEFT JOIN escalated ON escalated.period = wr.{period_col}
             LEFT JOIN newt ON newt.period = wr.{period_col}
             LEFT JOIN closed ON closed.period = wr.{period_col}
-            LEFT JOIN resolution_report_stats ON resolution_report_stats.period = wr.{period_col}
             LEFT JOIN median_fr ON median_fr.period = wr.{period_col}
             GROUP BY wr.{period_col}
             ORDER BY wr.{period_col}
@@ -1542,6 +2024,13 @@ class DatabaseStore:
                 period_col=period_col,
                 select_cols=select_cols,
                 statuses=statuses,
+                aged_days_short=self.aged_days_short,
+                aged_days_long=self.aged_days_long,
+                no_contact_days=self.no_contact_days,
+                closed_statuses=closed_statuses,
+                not_cancelled_jt=not_cancelled("jt.status"),
+                not_cancelled_jtr=not_cancelled("jtr.status"),
+                not_cancelled_jtaw=not_cancelled("status"),
                 aged_30_subquery=aged_30_subquery,
                 aged_5_subquery=aged_5_subquery,
                 aged_request_type_filter=aged_request_type_filter,
@@ -1553,6 +2042,9 @@ class DatabaseStore:
                 reporting_support_filter=reporting_support_filter,
                 active_request_type_filter=active_request_type_filter,
                 active_support_filter=active_support_filter,
+                active_category_cols=active_category_cols,
+                closed_category_cols=closed_category_cols,
+                summary_category_cols=summary_category_cols,
             )
 
         weekly_report_view_sql = build_summary_view_sql(
@@ -1680,6 +2172,10 @@ class DatabaseStore:
         if "end_assigned_user_email" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN end_assigned_user_email VARCHAR"))
+        for col in ("start_assigned_group", "end_assigned_group"):
+            if col not in cols:
+                with self.engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE jira_calendar ADD COLUMN {col} VARCHAR"))
         if "start_request_type" not in cols:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_calendar ADD COLUMN start_request_type VARCHAR"))
@@ -1713,6 +2209,12 @@ class DatabaseStore:
             with self.engine.begin() as conn:
                 conn.execute(text("ALTER TABLE jira_comments ADD COLUMN author_email VARCHAR"))
 
+        cols = [c["name"] for c in inspector.get_columns("jira_changelog")]
+        if "internal_user" not in cols:
+            # older rows stay NULL; agent_weekly_activity falls back to comment authors
+            with self.engine.begin() as conn:
+                conn.execute(text("ALTER TABLE jira_changelog ADD COLUMN internal_user BOOLEAN"))
+
         cols = [c["name"] for c in inspector.get_columns("jira_worklogs")]
         if "started_week" not in cols:
             with self.engine.begin() as conn:
@@ -1737,10 +2239,26 @@ class DatabaseStore:
 
     @log_call
     def insert_many(self, table: Table, rows: Iterable[dict[str, Any]]) -> None:
+        rows = list(rows)
         if not rows:
             return
-        with self.engine.begin() as conn:
-            conn.execute(table.insert().prefix_with("OR REPLACE"), list(rows))
+        if table is self.jira_tickets or table is self.jira_calendar:
+            self._extend_week_reporting(rows)
+        with self._begin() as conn:
+            conn.execute(table.insert().prefix_with("OR REPLACE"), rows)
+
+    def _extend_week_reporting(self, rows: list[dict[str, Any]]) -> None:
+        """Seed week_reporting so it spans the years of the inserted rows."""
+        years = {
+            value.isocalendar().year
+            for row in rows
+            for value in (row.get("created"), row.get("date"))
+            if isinstance(value, datetime.date)
+        }
+        if not years or years <= self._reporting_years:
+            return
+        known = years | self._reporting_years
+        self._seed_week_reporting(range(min(known), max(known) + 1))
 
     @log_call
     def newest_updated_ts(self) -> datetime.datetime | None:
@@ -1751,6 +2269,54 @@ class DatabaseStore:
         with self.engine.connect() as conn:
             result = conn.execute(select(func.max(self.jira_tickets.c.updated))).scalar()
         return result
+
+    def load_internal_group_members(self, groups: Iterable[str]) -> list[tuple[str, str | None]]:
+        """Stored (account id, display name) of the members of ``groups``."""
+        table = self.internal_group_members
+        with self.engine.connect() as conn:
+            return [
+                (account_id, name)
+                for account_id, name in conn.execute(
+                    select(table.c.account_id, table.c.display_name).where(
+                        table.c.group_name.in_(list(groups))
+                    )
+                )
+            ]
+
+    def replace_internal_group_members(
+        self, group: str, members: Iterable[tuple[str, str | None]]
+    ) -> None:
+        table = self.internal_group_members
+        with self.engine.begin() as conn:
+            conn.execute(table.delete().where(table.c.group_name == group))
+            rows = [
+                {"group_name": group, "account_id": account_id, "display_name": name}
+                for account_id, name in members
+            ]
+            if rows:
+                conn.execute(table.insert(), rows)
+
+    def update_changelog_internal_flags(self, ticket_id: str) -> None:
+        """Re-evaluate the internal flag of a ticket's stored changelog entries."""
+        table = self.jira_changelog
+        with self._begin() as conn:
+            authors = conn.execute(
+                select(table.c.author, table.c.author_email)
+                .where(table.c.ticket_id == ticket_id)
+                .distinct()
+            ).all()
+            for name, email in authors:
+                conn.execute(
+                    table.update()
+                    .where(table.c.ticket_id == ticket_id)
+                    .where(table.c.author.is_(name))
+                    .where(table.c.author_email.is_(email))
+                    .values(
+                        internal_user=is_internal_user(
+                            {"displayName": name, "emailAddress": email}
+                        )
+                    )
+                )
 
     @log_call
     def load_internal_patterns(self) -> list[Pattern[str]]:
@@ -1780,54 +2346,9 @@ class DatabaseStore:
         return compiled
 
     @log_call
-    def load_resolver_aliases(self) -> list[dict[str, Any]]:
-        inspector = sa_inspect(self.engine)
-        if "resolver_aliases" not in inspector.get_table_names():
-            return []
-        with self.engine.connect() as conn:
-            rows = conn.execute(
-                select(
-                    self.resolver_aliases.c.alias,
-                    self.resolver_aliases.c.canonical_name,
-                    self.resolver_aliases.c.level,
-                    self.resolver_aliases.c.priority,
-                ).order_by(self.resolver_aliases.c.priority)
-            ).fetchall()
-        return [
-            {
-                "alias": row.alias,
-                "alias_cf": row.alias.casefold().strip(),
-                "canonical_name": row.canonical_name,
-                "level": row.level,
-                "priority": row.priority,
-            }
-            for row in rows
-        ]
-
-    @log_call
-    def upsert_resolution_report(
-        self,
-        report_row: dict[str, Any],
-        resolver_rows: Iterable[dict[str, Any]],
-    ) -> None:
-        with self.engine.begin() as conn:
-            conn.execute(
-                self.resolution_reports.insert().prefix_with("OR REPLACE"),
-                [report_row],
-            )
-            conn.execute(
-                delete(self.resolution_resolvers).where(
-                    self.resolution_resolvers.c.ticket_id == report_row["ticket_id"]
-                )
-            )
-            resolver_rows = list(resolver_rows)
-            if resolver_rows:
-                conn.execute(self.resolution_resolvers.insert(), resolver_rows)
-
-    @log_call
     def get_ticket_with_related(self, ticket_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         """Load a ticket and related records from the database."""
-        with self.engine.connect() as conn:
+        with self._connect() as conn:
             t = (
                 conn.execute(
                     select(self.jira_tickets).where(self.jira_tickets.c.id == ticket_id)
@@ -1892,21 +2413,73 @@ class DatabaseStore:
         )
 
 
+def jira_session() -> requests.Session:
+    """HTTP session that retries dropped connections, timeouts, 429 and 5xx."""
+    retry = Retry(
+        total=JIRA_RETRIES,
+        backoff_factor=2,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=None,  # the search POST only reads, retrying it is safe
+        raise_on_status=False,  # the caller's raise_for_status reports the last status
+    )
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.mount("http://", HTTPAdapter(max_retries=retry))
+    return session
+
+
 class SupportStatsGetter:
     """Retrieve Jira ticket data and store it in the configured database."""
 
     @log_call
     def __init__(self, config: Config):
         self.config = config
+        self.http = jira_session()
+        message = missing_folder_message(config.db_path, "db_path")
+        if message:
+            raise FileNotFoundError(message)
         engine = create_engine(f"sqlite+pysqlite:///{config.db_path}")
         self.store = DatabaseStore(
-            engine, non_support_request_types=config.non_support_request_types
+            engine,
+            non_support_request_types=config.non_support_request_types,
+            support_issue_types=config.support_issue_types,
+            request_type_categories=config.request_type_categories,
+            request_type_category_default=config.request_type_category_default,
+            closed_statuses=config.closed_statuses,
+            cancelled_statuses=config.cancelled_statuses,
+            no_contact_ignore_statuses=config.no_contact_ignore_statuses,
+            aged_days_short=config.aged_days_short,
+            aged_days_long=config.aged_days_long,
+            no_contact_days=config.no_contact_days,
         )
+        global CLOSED_STATUSES, CANCELLED_STATUSES, RESOLUTION_TIME_EXCLUDED_STATUSES
+        CLOSED_STATUSES = {s.lower() for s in config.closed_statuses}
+        CANCELLED_STATUSES = {s.lower() for s in config.cancelled_statuses}
+        RESOLUTION_TIME_EXCLUDED_STATUSES = {
+            s.lower() for s in config.resolution_time_excluded_statuses
+        }
+        global INACTIVE_STATUSES
+        INACTIVE_STATUSES = {s.lower() for s in config.inactive_statuses}
+        global ASSIGNEE_GROUPS, ASSIGNEE_GROUP_DEFAULT
+        ASSIGNEE_GROUPS = list(config.assignee_groups)
+        ASSIGNEE_GROUP_DEFAULT = config.assignee_group_default
         global INTERNAL_EMAIL_PATTERNS
-        INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns()
+        INTERNAL_EMAIL_PATTERNS = self.store.load_internal_patterns() + [
+            # "manus.plus" or "@manus.plus" matches addresses ending in @manus.plus
+            re.compile("@" + re.escape(domain.strip().lstrip("@")) + "$", re.IGNORECASE)
+            for domain in config.internal_email_domains
+            if domain.strip().lstrip("@")
+        ]
+        # stored group members until load_internal_groups() refreshes them from Jira
+        self._set_internal_members(
+            self.store.load_internal_group_members(config.internal_groups)
+            if config.internal_groups
+            else None
+        )
         global ORG_PATTERNS
         ORG_PATTERNS = self.store.load_org_patterns()
-        self.resolver_aliases = self.store.load_resolver_aliases()
+        global PRIORITY_POS_MAP
+        PRIORITY_POS_MAP = dict(config.priority_positions)
 
     def _field_value(
         self,
@@ -1924,10 +2497,109 @@ class SupportStatsGetter:
                 return fields.get(key)
         return None
 
+    @staticmethod
+    def _set_internal_members(members: list[tuple[str, str | None]] | None) -> None:
+        global INTERNAL_ACCOUNT_IDS, INTERNAL_NAMES
+        if members is None:
+            INTERNAL_ACCOUNT_IDS, INTERNAL_NAMES = None, set()
+        else:
+            INTERNAL_ACCOUNT_IDS = {account_id for account_id, _ in members}
+            INTERNAL_NAMES = {name for _, name in members if name}
+
+    @log_call
+    def load_internal_groups(self) -> None:
+        """Refresh the members of ``internal_groups`` from Jira.
+
+        Keeps the members stored by an earlier run when Jira can't be reached.
+        """
+        if not self.config.internal_groups:
+            return
+        for group in self.config.internal_groups:
+            try:
+                members = self.fetch_group_members(group)
+            except requests.RequestException:
+                logging.exception(
+                    "Could not load the members of group %r; using the stored members", group
+                )
+                continue
+            if not members:
+                logging.warning("Group %r has no members (or does not exist)", group)
+            self.store.replace_internal_group_members(group, members)
+        members = self.store.load_internal_group_members(self.config.internal_groups)
+        logging.info("%d internal users from groups %s", len(members), self.config.internal_groups)
+        self._set_internal_members(members)
+
+    def fetch_group_members(self, group: str) -> list[tuple[str, str | None]]:
+        """(account id, display name) of all user members of a Jira group, inactive ones included.
+
+        App accounts (automations, integrations) are left out: Jira adds them to
+        groups such as service-desk-agents as well.
+        """
+        members: list[tuple[str, str | None]] = []
+        start_at = 0
+        while True:
+            r = self._jira_get(
+                f"{self.config.jira_base_url}/rest/api/3/group/member",
+                {
+                    "groupname": group,
+                    "startAt": start_at,
+                    "maxResults": 50,
+                    "includeInactiveUsers": "true",
+                },
+            )
+            if r.status_code == 404:
+                return []
+            r.raise_for_status()
+            data = r.json()
+            values = data.get("values", [])
+            members += [
+                (m["accountId"], m.get("displayName"))
+                for m in values
+                if m.get("accountType", "atlassian") == "atlassian"
+            ]
+            if data.get("isLast", True) or not values:
+                return members
+            start_at += len(values)
+
     def _jira_auth(self) -> tuple[str, str] | None:
         if self.config.jira_user and self.config.jira_token:
             return (self.config.jira_user, self.config.jira_token)
         return None
+
+    def _check_jira_auth(self, response: requests.Response) -> requests.Response:
+        """Raise ``JiraAuthError`` when Jira rejected the login."""
+        if response.status_code == 401:
+            raise JiraAuthError(
+                f"Jira rejected the login for {self.config.jira_user!r} (401 Unauthorized): "
+                "the API token has probably expired or was revoked, or the email "
+                "address is wrong. Create a new token at "
+                "https://id.atlassian.com/manage-profile/security/api-tokens and set it "
+                "in jira_token in the config or in the environment variable "
+                "SUPPORTSTATS_JIRA_TOKEN (run.bat asks for it)."
+            )
+        return response
+
+    def _jira_get(self, url: str, params: dict[str, Any]) -> requests.Response:
+        return self._check_jira_auth(
+            self.http.get(
+                url,
+                params=params,
+                auth=self._jira_auth(),
+                headers={"Accept": "application/json"},
+                timeout=JIRA_TIMEOUT,
+            )
+        )
+
+    def _jira_post(self, url: str, payload: dict[str, Any]) -> requests.Response:
+        return self._check_jira_auth(
+            self.http.post(
+                url,
+                json=payload,
+                auth=self._jira_auth(),
+                headers={"Accept": "application/json"},
+                timeout=JIRA_TIMEOUT,
+            )
+        )
 
     @log_call
     def latest_update_timestamp(self) -> datetime.datetime | None:
@@ -1948,6 +2620,12 @@ class SupportStatsGetter:
         mode:
             Behaviour when the target file already exists.
         """
+        if (
+            self.store.request_type_categories is None
+            and not self.store.support_issue_types
+        ):
+            # one category per stored issue type: pick up types fetched in this run
+            self.store._create_views()
         inspector = sa_inspect(self.store.engine)
         views = inspector.get_view_names()
         output_file = Path(output_file)
@@ -1981,6 +2659,7 @@ class SupportStatsGetter:
                     v = f"'{v}"
             return v
 
+        exported: dict[str, tuple[str, pd.DataFrame]] = {}
         for idx, view in enumerate(views, start=1):
             logging.info("Writing view %d/%d: %s", idx, total_views, view)
             df = pd.read_sql_query(f'SELECT * FROM "{view}"', self.store.engine)
@@ -1992,6 +2671,7 @@ class SupportStatsGetter:
                         pass
                 df[col] = df[col].apply(sanitize_value)
             safe_name = re.sub(r'[/\\*?:\[\]]', '_', view)[:31]
+            exported[view] = (safe_name, df)
             if safe_name in wb.sheetnames:
                 ws = wb[safe_name]
                 if ws.tables:
@@ -2003,7 +2683,7 @@ class SupportStatsGetter:
                     row_idx = first_row
                     for data_row in dataframe_to_rows(df, index=False, header=False):
                         for col_idx, value in enumerate(data_row, start=start_col):
-                            ws.cell(row=row_idx, column=col_idx, value=sanitize_value(value))
+                            ws.cell(row=row_idx, column=col_idx, value=value)
                         row_idx += 1
                     old_last_row = ws[old_end].row
                     num_cols = len(df.columns)
@@ -2015,51 +2695,442 @@ class SupportStatsGetter:
                 else:
                     ws.delete_rows(1, ws.max_row)
                     for row in dataframe_to_rows(df, index=False, header=True):
-                        ws.append([sanitize_value(v) for v in row])
+                        ws.append(row)
             else:
                 ws = wb.create_sheet(title=safe_name)
                 for row in dataframe_to_rows(df, index=False, header=True):
-                    ws.append([sanitize_value(v) for v in row])
+                    ws.append(row)
 
+        self._format_priority_sheet(wb, exported)
+        self._write_dashboard(wb, exported)
         wb.save(output_file)
         logging.info("Finished exporting Excel workbook to %s", output_file)
+
+    def _format_priority_sheet(
+        self,
+        wb: Workbook,
+        exported: Mapping[str, tuple[str, pd.DataFrame]],
+    ) -> None:
+        """Make the priority_tickets sheet a follow-up list next to the dashboard.
+
+        Ticket keys link to Jira, the header row stays visible and has filters
+        (e.g. on week, month or quarter), and the sheet comes right after the
+        dashboard.
+        """
+        if "priority_tickets" not in exported:
+            return
+        sheet, df = exported["priority_tickets"]
+        ws = wb[sheet]
+        wb.move_sheet(ws, offset=-wb.index(ws))
+        ws.freeze_panes = "A2"
+        if not df.empty:
+            ws.auto_filter.ref = ws.dimensions
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        base_url = (self.config.jira_base_url or "").rstrip("/")
+        key_col = df.columns.get_loc("ticket_key") + 1
+        if base_url:
+            for row in range(2, len(df) + 2):
+                cell = ws.cell(row=row, column=key_col)
+                if cell.value:
+                    cell.hyperlink = f"{base_url}/browse/{cell.value}"
+                    cell.style = "Hyperlink"
+        widths = {"summary": 60, "organization": 30, "request_type": 30, "current_assignee": 22}
+        for col, name in enumerate(df.columns, start=1):
+            ws.column_dimensions[get_column_letter(col)].width = widths.get(name, 14)
+
+    def _write_dashboard(
+        self,
+        wb: Workbook,
+        exported: Mapping[str, tuple[str, pd.DataFrame]],
+    ) -> None:
+        """Add a formula-driven KPI dashboard in front of the exported view sheets.
+
+        The dashboard shows the summary views from a selectable start quarter up
+        to the current period. Start quarter, granularity and whether the
+        current (incomplete) period is included are input cells; tables and
+        charts follow them through formulas and OFFSET-based names, so no pivot
+        tables or refresh are needed.
+        """
+        period_views = {
+            "weekly_support_summary": "week",
+            "monthly_support_summary": "month",
+            "quarterly_support_summary": "quarter",
+        }
+        if any(v not in exported or exported[v][1].empty for v in period_views):
+            logging.info("Summary views missing or empty, skipping dashboard")
+            return
+        weekly = exported["weekly_support_summary"][1]
+
+        def rng(view: str, col: str) -> str:
+            sheet, df = exported[view]
+            letter = get_column_letter(df.columns.get_loc(col) + 1)
+            return f"'{sheet}'!${letter}$2:${letter}${len(df) + 1}"
+
+        def choose(cols: Mapping[str, str]) -> str:
+            ranges = ",".join(rng(view, cols[view]) for view in period_views)
+            return f"CHOOSE(dashboard_calc!$B$5,{ranges})"
+
+        def in_all_views(col: str) -> bool:
+            return all(col in exported[v][1].columns for v in period_views)
+
+        # "now" is the export date, mapped to its reporting month and quarter
+        today = datetime.date.today()
+        today_week = cw_string_from_datetime(datetime.datetime.combine(today, datetime.time()))
+        weeks = [str(w) for w in weekly["week"]]
+        now_week = max((w for w in weeks if w <= today_week), default=weeks[0])
+        now_row = weekly[weekly["week"] == now_week].iloc[0]
+        now_month, now_quarter = str(now_row["month"]), str(now_row["quarter"])
+        quarters = [
+            str(q) for q in exported["quarterly_support_summary"][1]["quarter"]
+            if str(q) <= now_quarter
+        ]
+        start_quarter = self.config.dashboard_start_quarter
+        if start_quarter not in quarters:
+            start_quarter = quarters[max(0, quarters.index(now_quarter) - 4)]
+
+        period_by_view = dict(period_views)
+        quarter_by_view = {v: "quarter" for v in period_views}
+
+        # hidden helper sheet with the window calculation and dropdown lists
+        calc = wb.create_sheet("dashboard_calc")
+        calc.sheet_state = "hidden"
+        calc_rows = [
+            ("now_week", now_week),
+            ("now_month", now_month),
+            ("now_quarter", now_quarter),
+            ("start_quarter", '=""&Dashboard!$C$4'),
+            ("granularity", '=MATCH(Dashboard!$C$5,{"Week","Month","Quarter"},0)'),
+            ("first_row", f"=MATCH(B4,{choose(quarter_by_view)},0)"),
+            (
+                "last_row",
+                f"=MATCH(CHOOSE(B5,B1,B2,B3),{choose(period_by_view)},0)"
+                '-IF(Dashboard!$C$6="Yes",0,1)',
+            ),
+            ("periods", "=IFERROR(MAX(0,B7-B6+1),0)"),
+            (
+                "last_full_period",
+                f"=IFERROR(INDEX({choose(period_by_view)},"
+                f'MATCH(CHOOSE(B5,B1,B2,B3),{choose(period_by_view)},0)-1),"")',
+            ),
+            ("first_period", f'=IF(B8>0,INDEX({choose(period_by_view)},B6),"")'),
+            ("last_period", f'=IF(B8>0,INDEX({choose(period_by_view)},B6+B8-1),"")'),
+        ]
+        for row, (label, value) in enumerate(calc_rows, start=1):
+            calc.cell(row=row, column=1, value=label)
+            calc.cell(row=row, column=2, value=value)
+        calc["D1"] = "quarters"
+        for row, quarter in enumerate(quarters, start=2):
+            calc.cell(row=row, column=4, value=quarter)
+
+        dash = wb.create_sheet("Dashboard")
+        wb.move_sheet(dash, offset=-wb.index(dash))
+        for ws in wb.worksheets:
+            ws.sheet_view.tabSelected = ws is dash
+        wb.active = 0
+        wb.calculation.fullCalcOnLoad = True
+
+        input_fill = PatternFill("solid", fgColor="FFF2CC")
+        header_fill = PatternFill("solid", fgColor="DDEBF7")
+        thin = Side(style="thin", color="A6A6A6")
+        box = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        dash["A1"] = "Support KPI dashboard"
+        dash["A1"].font = Font(bold=True, size=16)
+        dash["A2"] = (
+            f"Data as of {today.isoformat()} (week {now_week}). Change the yellow "
+            "cells; tables and charts follow automatically."
+        )
+        dash["A2"].font = Font(italic=True, color="595959")
+        controls = [
+            ("Start quarter", start_quarter, f"dashboard_calc!$D$2:$D${len(quarters) + 1}"),
+            ("Granularity", "Week", '"Week,Month,Quarter"'),
+            # the current period is incomplete and would pull every chart down at the end
+            ("Include current period", "No", '"Yes,No"'),
+        ]
+        for row, (label, value, options) in enumerate(controls, start=4):
+            dash.cell(row=row, column=1, value=label).font = Font(bold=True)
+            cell = dash.cell(row=row, column=3, value=value)
+            cell.fill, cell.border, cell.font = input_fill, box, Font(bold=True)
+            dv = DataValidation(type="list", formula1=options, allow_blank=False)
+            dv.add(cell)
+            dash.add_data_validation(dv)
+        dash["E4"] = "Showing:"
+        dash["E4"].font = Font(bold=True)
+        dash["F4"] = (
+            '=IF(dashboard_calc!$B$8>0,dashboard_calc!$B$10&" to "&dashboard_calc!$B$11'
+            '&" ("&dashboard_calc!$B$8&" periods)","no data for this selection")'
+        )
+
+        # KPI table columns: period, metrics, per-category active/closed
+        thresholds = {
+            "aged_days_short": self.config.aged_days_short,
+            "aged_days_long": self.config.aged_days_long,
+            "no_contact_days": self.config.no_contact_days,
+        }
+        columns: list[tuple[str, str, str]] = [
+            (col, label.format(**thresholds), fmt)
+            for col, label, fmt in DASHBOARD_METRICS
+            if in_all_views(col)
+        ]
+        for prefix, label in (("open_", "Active"), ("closed_", "Closed")):
+            columns += [
+                (col, f"{label} {col[len(prefix):].upper()}", "0")
+                for col in weekly.columns
+                if col.startswith(prefix) and col != "closed_tickets" and in_all_views(col)
+            ]
+
+        charts = []
+        for title, kind, wanted in DASHBOARD_CHARTS:
+            cols = []
+            for want in wanted:
+                if want.endswith("*"):
+                    cols += [
+                        c for c, _, _ in columns
+                        if c.startswith(want[:-1]) and c != "closed_tickets"
+                    ]
+                elif any(c == want for c, _, _ in columns):
+                    cols.append(want)
+            if cols:
+                charts.append((title, kind, cols))
+
+        customers = exported.get("customer_weekly_summary")
+        has_customers = customers is not None and not customers[1].empty
+        # per-customer measures: (chart title or None, table header, column, category)
+        cust_measures: list[tuple[str | None, str, str, str | None]] = []
+        if has_customers:
+            cats = sorted({str(c) for c in customers[1]["request_type_category"]})
+            cust_measures.append(("New tickets per customer", "New", "new_tickets", None))
+            if len(cats) > 1:
+                cust_measures += [
+                    (f"New {cat} tickets per customer", f"New {cat}", "new_tickets", cat)
+                    for cat in cats
+                ]
+            cust_measures += [
+                (None, "Closed", "closed_tickets", None),
+                ("Hours logged per customer", "Hours logged", "hours_logged", None),
+            ]
+        cust_charts = [m for m in cust_measures if m[0]]
+        cust_row = 8 + 15 * ((len(charts) + 1) // 2)
+        cust_table_row = cust_row + 1 + 15 * ((len(cust_charts) + 1) // 2)
+        table_row = (
+            cust_table_row + DASHBOARD_TOP_CUSTOMERS + 3 if has_customers else cust_row
+        )
+        first = table_row + 1
+        max_rows = len(weekly)
+
+        dash.column_dimensions["A"].width = 22 if has_customers else 12
+        for idx in range(2, len(columns) + 2):
+            dash.column_dimensions[get_column_letter(idx)].width = 11
+
+        dash.cell(row=table_row, column=1, value="Period")
+        for idx, (col, label, fmt) in enumerate(columns, start=2):
+            dash.cell(row=table_row, column=idx, value=label)
+        for idx in range(1, len(columns) + 2):
+            cell = dash.cell(row=table_row, column=idx)
+            cell.font, cell.fill, cell.border = Font(bold=True), header_fill, box
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        dash.row_dimensions[table_row].height = 30
+
+        sources = [("period", period_by_view, "@", False)] + [
+            (col, {v: col for v in period_views}, fmt, col in DASHBOARD_NULLABLE_METRICS)
+            for col, _, fmt in columns
+        ]
+        for idx, (_, cols, fmt, nullable) in enumerate(sources, start=1):
+            src = choose(cols)
+            for k in range(1, max_rows + 1):
+                value = f"INDEX({src},dashboard_calc!$B$6+{k - 1})"
+                if nullable:
+                    value = f'IF({value}="",NA(),{value})'
+                cell = dash.cell(
+                    row=first + k - 1,
+                    column=idx,
+                    value=f'=IF({k}>dashboard_calc!$B$8,"",{value})',
+                )
+                cell.number_format = fmt
+        last_col = get_column_letter(len(columns) + 1)
+        dash.conditional_formatting.add(
+            f"A{first}:{last_col}{first + max_rows - 1}",
+            FormulaRule(formula=[f"ISNA(A{first})"], font=Font(color="BFBFBF")),
+        )
+
+        def add_name(name: str, column: int, top: int, count: str, sheet: str = "Dashboard") -> str:
+            letter = get_column_letter(column)
+            dash.defined_names[name] = DefinedName(
+                name, attr_text=f"OFFSET({sheet}!${letter}${top},0,0,MAX(1,{count}),1)"
+            )
+            return f"Dashboard!{name}"
+
+        refs = {
+            col: add_name(f"Dash_{col}", idx, first, "dashboard_calc!$B$8")
+            for idx, (col, *_) in enumerate(sources, start=1)
+        }
+        labels = {col: label for col, label, _ in columns}
+        formats = {col: fmt for col, _, fmt in columns}
+
+        def series(values: str, categories: str, title: str) -> Series:
+            s = Series()
+            s.val = NumDataSource(numRef=NumRef(f=values))
+            s.cat = AxDataSource(strRef=StrRef(f=categories))
+            s.tx = SeriesLabel(v=title)
+            s.smooth = False
+            return s
+
+        def new_chart(kind: str, title: str):
+            if kind == "line":
+                chart = LineChart()
+            else:
+                chart = BarChart()
+                chart.type = "bar" if kind == "bar" else "col"
+                chart.gapWidth = 60
+                if kind == "stacked":
+                    chart.grouping, chart.overlap = "stacked", 100
+            chart.varyColors = False
+            chart.title = title
+            chart.title.overlay = False
+            chart.width, chart.height = 16, 7.5
+            chart.x_axis.delete = chart.y_axis.delete = False
+            chart.y_axis.number_format = "General"
+            chart.legend.position = "b"
+            chart.legend.overlay = False
+            return chart
+
+        for idx, (title, kind, cols) in enumerate(charts):
+            chart = new_chart(kind, title)
+            for col in cols:
+                chart.series.append(series(refs[col], refs["period"], labels[col]))
+            if len(cols) == 1:
+                chart.legend = None
+                if formats[cols[0]] == "0%":
+                    chart.y_axis.number_format = "0%"
+            anchor_col = "A" if idx % 2 == 0 else "J"
+            dash.add_chart(chart, f"{anchor_col}{8 + 15 * (idx // 2)}")
+
+        if not has_customers:
+            return
+
+        # customers in the last complete period of the selected granularity
+        cust_sheet, cust_df = customers
+        cust_ranges = {}
+        for col in (
+            "week", "month", "quarter", "organization", "request_type_category",
+            "new_tickets", "closed_tickets", "hours_logged",
+        ):
+            letter = get_column_letter(cust_df.columns.get_loc(col) + 1)
+            cust_ranges[col] = f"'{cust_sheet}'!${letter}$2:${letter}${len(cust_df) + 1}"
+        in_period = (
+            f"(CHOOSE($B$5,{cust_ranges['week']},{cust_ranges['month']},"
+            f"{cust_ranges['quarter']})=$B$9)"
+        )
+        orgs = sorted({str(o) for o in cust_df["organization"]})
+        end = len(orgs) + 1
+        calc["E1"], calc["F1"] = "customers_ranked", "organization"
+        for row, org in enumerate(orgs, start=2):
+            calc[f"F{row}"] = org
+        # per measure: value and tie-broken score per customer, then the ranked top list
+        values: list[str] = []
+        ranked: list[tuple[int, int]] = []
+        rank_base = 7 + 2 * len(cust_measures)
+        for j, (_, header, col, cat) in enumerate(cust_measures):
+            v, sc = get_column_letter(7 + 2 * j), get_column_letter(8 + 2 * j)
+            calc[f"{v}1"], calc[f"{sc}1"] = header, f"{header} rank"
+            cat_filter = ""
+            if cat:
+                quoted = cat.replace('"', '""')
+                cat_filter = f'*({cust_ranges["request_type_category"]}="{quoted}")'
+            for row in range(2, end + 1):
+                calc[f"{v}{row}"] = (
+                    f"=SUMPRODUCT(({cust_ranges['organization']}=$F{row})*{in_period}"
+                    f"{cat_filter}*{cust_ranges[col]})"
+                )
+                calc[f"{sc}{row}"] = f"={v}{row}+ROW()/1000000000"
+            calc[f"E{j + 2}"] = (
+                f'=MIN({DASHBOARD_TOP_CUSTOMERS},COUNTIF(${v}$2:${v}${end},">0"))'
+            )
+            values.append(f"dashboard_calc!${v}$2:${v}${end}")
+            org_col, top_col = rank_base + 2 * j, rank_base + 2 * j + 1
+            o, t = get_column_letter(org_col), get_column_letter(top_col)
+            calc[f"{o}1"], calc[f"{t}1"] = f"{header} customer", f"{header} top"
+            scores = f"${sc}$2:${sc}${end}"
+            for i in range(1, DASHBOARD_TOP_CUSTOMERS + 1):
+                match = f"MATCH(LARGE({scores},{i}),{scores},0)"
+                guard = f'IF({i}>$E${j + 2},"",'
+                calc[f"{o}{i + 1}"] = f"={guard}INDEX($F$2:$F${end},{match}))"
+                calc[f"{t}{i + 1}"] = f"={guard}INDEX(${v}$2:${v}${end},{match}))"
+            ranked.append((org_col, top_col))
+
+        dash[f"A{cust_row}"] = "Customers in the last complete period:"
+        dash[f"C{cust_row}"] = '=IF(dashboard_calc!$B$9="","none",dashboard_calc!$B$9)'
+        for ref in (f"A{cust_row}", f"C{cust_row}"):
+            dash[ref].font = Font(bold=True, size=13)
+        chart_idx = 0
+        for j, (title, *_) in enumerate(cust_measures):
+            if not title:
+                continue
+            org_col, top_col = ranked[j]
+            count = f"dashboard_calc!$E${j + 2}"
+            chart = new_chart("bar", title)
+            chart.x_axis.scaling.orientation = "maxMin"
+            chart.x_axis.tickLblSkip = 1
+            chart.y_axis.crosses = "max"
+            chart.legend = None
+            chart.series.append(
+                series(
+                    add_name(f"Dash_cust{j}_top", top_col, 2, count, "dashboard_calc"),
+                    add_name(f"Dash_cust{j}_org", org_col, 2, count, "dashboard_calc"),
+                    title,
+                )
+            )
+            anchor_col = "A" if chart_idx % 2 == 0 else "J"
+            dash.add_chart(chart, f"{anchor_col}{cust_row + 1 + 15 * (chart_idx // 2)}")
+            chart_idx += 1
+
+        # customer table, ranked by new tickets
+        headers = ["Customer"] + [header for _, header, _, _ in cust_measures]
+        for c, header in enumerate(headers, start=1):
+            cell = dash.cell(row=cust_table_row, column=c, value=header)
+            cell.font, cell.fill, cell.border = Font(bold=True), header_fill, box
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        org_letter = get_column_letter(ranked[0][0])
+        for i in range(1, DASHBOARD_TOP_CUSTOMERS + 1):
+            row = cust_table_row + i
+            dash.cell(row=row, column=1, value=f"=dashboard_calc!${org_letter}${i + 1}")
+            for j, (_, _, col, _) in enumerate(cust_measures):
+                cell = dash.cell(
+                    row=row,
+                    column=j + 2,
+                    value=(
+                        f'=IF($A{row}="","",INDEX({values[j]},'
+                        f"MATCH($A{row},dashboard_calc!$F$2:$F${end},0)))"
+                    ),
+                )
+                cell.number_format = "0.0" if col == "hours_logged" else "0"
 
     @log_call
     def recalculate_all(self) -> None:
         """Recalculate KPI and mapped fields for all stored tickets."""
         with self.store.engine.connect() as conn:
             tickets = [tid for (tid,) in conn.execute(select(self.store.jira_tickets.c.id)).fetchall()]
-        self.recalculate_tickets(tickets)
-
-    def backfill_resolution_reports(self, since: datetime.date) -> None:
-        """Fetch and populate resolution_reports for resolved tickets since `since` that have no category."""
-        since_str = datetime.datetime(since.year, since.month, since.day, tzinfo=datetime.UTC).isoformat()
-        with self.store.engine.connect() as conn:
-            rows = conn.execute(
-                text("""
-                    SELECT jt.id, jt.key
-                    FROM jira_tickets jt
-                    LEFT JOIN resolution_reports rr ON rr.ticket_id = jt.id
-                    WHERE jt.resolved >= :since
-                      AND (rr.ticket_id IS NULL OR rr.category IS NULL)
-                """),
-                {"since": since_str},
-            ).fetchall()
-
-        total = len(rows)
-        logging.info("Backfilling resolution reports for %d tickets resolved since %s", total, since)
-        for idx, (ticket_id, ticket_key) in enumerate(rows, 1):
-            logging.info("Backfilling %s (%d/%d)", ticket_key, idx, total)
-            issue = self.fetch_jira_issue(ticket_key)
-            if issue is None:
-                logging.warning("Could not fetch %s from Jira — skipping", ticket_key)
-                continue
-            self.process_resolution_report(issue)
-        logging.info("Backfill complete: processed %d tickets", total)
+        logging.info("Recalculating %d tickets", len(tickets))
+        batch_size = 500
+        for start in range(0, len(tickets), batch_size):
+            self.recalculate_tickets(tickets[start:start + batch_size])
+            logging.info(
+                "Recalculated %d of %d tickets",
+                min(start + batch_size, len(tickets)),
+                len(tickets),
+            )
 
     @log_call
     def recalculate_tickets(self, ticket_ids: Iterable[str]) -> None:
-        """Recalculate KPI and mapped fields for the given ticket ids."""
+        """Recalculate KPI and mapped fields for the given ticket ids.
+
+        All changes are committed together at the end.
+        """
+        with self.store.batch():
+            self._recalculate_tickets(ticket_ids)
+
+    def _recalculate_tickets(self, ticket_ids: Iterable[str]) -> None:
         for ticket_id in ticket_ids:
             issue_row, comments, worklogs, changelog = self.store.get_ticket_with_related(
                 ticket_id
@@ -2076,14 +3147,21 @@ class SupportStatsGetter:
                 }
                 updated = dict(c)
                 # Preserve stored flag if no email is present to avoid
-                # misclassifying internal comments
+                # misclassifying internal comments; with internal_groups the
+                # display name is enough to decide
                 internal_stored = c.get("internal_user")
-                if internal_stored is not None and not c.get("author_email"):
+                if (
+                    internal_stored is not None
+                    and not c.get("author_email")
+                    and INTERNAL_ACCOUNT_IDS is None
+                ):
                     updated["internal_user"] = internal_stored
                 else:
                     updated["internal_user"] = is_internal_user(author)
                 updated_comments.append(updated)
             self.store.insert_many(self.store.jira_comments, updated_comments)
+            if INTERNAL_ACCOUNT_IDS is not None:
+                self.store.update_changelog_internal_flags(ticket_id)
 
             fields = {
                 "summary": issue_row.get("summary"),
@@ -2094,6 +3172,18 @@ class SupportStatsGetter:
                     "displayName": issue_row.get("assignee"),
                     "emailAddress": issue_row.get("assignee_email"),
                 }
+            if issue_row.get("creator"):
+                fields["creator"] = {
+                    "displayName": issue_row.get("creator"),
+                    "emailAddress": issue_row.get("creator_email"),
+                }
+            if issue_row.get("request_participants"):
+                # stored as a comma-separated list of emails (or names)
+                fields["requestParticipants"] = [
+                    {"emailAddress": p}
+                    for p in issue_row["request_participants"].split(",")
+                    if p
+                ]
             if issue_row.get("labels"):
                 fields["labels"] = [l for l in issue_row.get("labels", "").split(",") if l]
             if issue_row.get("priority"):
@@ -2128,15 +3218,15 @@ class SupportStatsGetter:
             }
             processed_issue = calculate_kpi_fields(issue, updated_comments, changelog)
             self.store_jira_tickets([processed_issue])
-            self.process_resolution_report(issue)
             calendar_rows = make_jira_ticket_calendar(
                 processed_issue,
                 updated_comments,
                 worklogs,
                 changelog,
                 self.config.custom_fields.get("request_type"),
+                self.config.priority_deescalation_ignore_minutes,
             )
-            with self.store.engine.begin() as conn:
+            with self.store._begin() as conn:
                 conn.execute(
                     delete(self.store.jira_calendar).where(
                         self.store.jira_calendar.c.ticket_id == ticket_id
@@ -2161,12 +3251,7 @@ class SupportStatsGetter:
                 "maxResults": max_results,
                 "expand": "renderedBody",
             }
-            r = requests.get(
-                url,
-                params=params,
-                auth=self._jira_auth(),
-                headers={"Accept": "application/json"},
-            )
+            r = self._jira_get(url, params)
             r.raise_for_status()
             data = r.json()
             comments = data.get("comments", [])
@@ -2196,12 +3281,7 @@ class SupportStatsGetter:
 
         while True:
             params = {"startAt": start_at, "maxResults": max_results}
-            r = requests.get(
-                url,
-                params=params,
-                auth=self._jira_auth(),
-                headers={"Accept": "application/json"},
-            )
+            r = self._jira_get(url, params)
             r.raise_for_status()
             data = r.json()
             logs = data.get("worklogs", [])
@@ -2231,12 +3311,7 @@ class SupportStatsGetter:
 
         while True:
             params = {"startAt": start_at, "maxResults": max_results}
-            r = requests.get(
-                url,
-                params=params,
-                auth=self._jira_auth(),
-                headers={"Accept": "application/json"},
-            )
+            r = self._jira_get(url, params)
             r.raise_for_status()
             data = r.json()
             histories = data.get("values") or data.get("histories", [])
@@ -2251,44 +3326,26 @@ class SupportStatsGetter:
 
         return all_changes
 
-    @log_call
-    def fetch_jira_issue(self, issue_key: str) -> dict[str, Any] | None:
-        """Fetch a single issue from Jira by key. Returns None if not found."""
-        url = f"{self.config.jira_base_url}/rest/api/3/issue/{issue_key}"
-        r = requests.get(
-            url,
-            auth=self._jira_auth(),
-            headers={"Accept": "application/json"},
-            params={"fields": "*all"},
-        )
-        if r.status_code == 404:
-            return None
-        r.raise_for_status()
-        issue = r.json()
-        fields = issue.get("fields", {})
-        issue["created"] = self._parse_ts(fields.get("created"))
-        issue["resolved"] = self._parse_ts(fields.get("resolutiondate"))
-        issue["updated"] = self._parse_ts(fields.get("updated"))
-        return issue
-
     def fetch_jira_tickets(self, jql: str = "", updated_since: datetime.datetime | None = None) -> list[dict[str, Any]]:
         """Fetch issues from Jira using the search API (handles pagination)."""
         if not self.config.jira_base_url:
             logging.getLogger(__name__).error("jira_base_url not configured")
             raise ValueError("jira_base_url not configured")
 
-        base = self.config.base_jql or ""
         parts = []
-        if base:
-            parts.append(base)
-        extra = jql.strip()
-        if extra:
-            parts.append(f"({extra})")
+        for clause in (self.config.base_jql or "", jql):
+            # an ORDER BY can't be followed by AND; the order is set below
+            clause = re.split(r"\border\s+by\b", clause, flags=re.IGNORECASE)[0].strip()
+            if clause:
+                parts.append(f"({clause})")
         if updated_since:
             get_since = updated_since - datetime.timedelta(minutes=JIRA_PULL_OVERLAP_MIN)
             ts = get_since.astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M")
             parts.append(f"updated >= \"{ts}\"")
-        final_jql = " AND ".join(parts)
+        # Oldest change first: the run saves tickets in batches, and the next
+        # run continues from the newest saved "updated", so an aborted run
+        # must not have saved newer tickets before older ones
+        final_jql = " AND ".join(parts) + " ORDER BY updated ASC"
 
         url = f"{self.config.jira_base_url}/rest/api/3/search/jql"
         next_page_token: str | None = None
@@ -2304,12 +3361,7 @@ class SupportStatsGetter:
             if next_page_token:
                 payload["nextPageToken"] = next_page_token
             logging.getLogger(__name__).info(f"POST {url} json={payload}")
-            r = requests.post(
-                url,
-                json=payload,
-                auth=self._jira_auth(),
-                headers={"Accept": "application/json"},
-            )
+            r = self._jira_post(url, payload)
             r.raise_for_status()
             data = r.json()
 
@@ -2483,6 +3535,7 @@ class SupportStatsGetter:
             history_id = hist.get("id")
             author = hist.get("author", {}).get("displayName")
             author_email = hist.get("author", {}).get("emailAddress")
+            internal = is_internal_user(hist.get("author"))
             created = hist.get("created")
             items = hist.get("items", [])
             for idx, item in enumerate(items):
@@ -2500,114 +3553,10 @@ class SupportStatsGetter:
                         "from_string": item.get("fromString"),
                         "to_value": item.get("to"),
                         "to_string": item.get("toString"),
+                        "internal_user": internal,
                 }
             )
         self.store.insert_many(self.store.jira_changelog, records)
-
-    def _body_to_text(self, comment: Mapping[str, Any]) -> str:
-        raw_body = comment.get("body")
-        rendered = comment.get("renderedBody")
-        body = ""
-        if isinstance(raw_body, dict):
-            body = self._adf_to_text(raw_body)
-        elif isinstance(raw_body, str):
-            body = raw_body
-            if raw_body.lstrip().startswith("{"):
-                try:
-                    parsed = json.loads(raw_body)
-                except json.JSONDecodeError:
-                    parsed = None
-                if isinstance(parsed, dict):
-                    body = self._adf_to_text(parsed)
-        if not body and rendered:
-            body = str(rendered)
-        return body or ""
-
-    def process_resolution_report(
-        self,
-        issue: Mapping[str, Any],
-    ) -> None:
-        fields = issue.get("fields", {}) if isinstance(issue, Mapping) else {}
-        raw = self._field_value(fields, "resolution_summary")
-        body = ""
-        if isinstance(raw, dict):
-            body = self._adf_to_text(raw)
-        elif isinstance(raw, str):
-            body = raw
-
-        extracted = extract_resolution_data(body) if body else None
-
-        if not extracted:
-            ticket_id = issue.get("id")
-            if ticket_id:
-                with self.store.engine.begin() as conn:
-                    conn.execute(
-                        delete(self.store.resolution_resolvers).where(
-                            self.store.resolution_resolvers.c.ticket_id == ticket_id
-                        )
-                    )
-                    conn.execute(
-                        delete(self.store.resolution_reports).where(
-                            self.store.resolution_reports.c.ticket_id == ticket_id
-                        )
-                    )
-            return
-
-        extracted.setdefault("resolvers", extracted.get("resolvers", []))
-
-        resolvers_list = extracted.get("resolvers") or []
-        resolvers_raw = ", ".join(resolvers_list)
-        mapped_order: list[tuple[str, int]] = []
-        for name in resolvers_list:
-            mapped_order.extend(map_resolvers_from_text(name, self.resolver_aliases))
-
-        extracted_primary = mapped_order[0][0] if mapped_order else None
-        extracted_primary_level = mapped_order[0][1] if mapped_order else None
-        resolve_helpers_mapped = [n for n, _ in mapped_order[1:]] if len(mapped_order) > 1 else []
-        all_levels = [lvl for _, lvl in mapped_order]
-        escalated_level = max(all_levels) if all_levels else None
-
-        outcome_val = extracted.get("outcome")
-        if isinstance(outcome_val, str):
-            trimmed = outcome_val.strip()
-            lowered = trimmed.casefold()
-            if lowered.startswith("abandoned"):
-                outcome_val = "Abandoned"
-            elif lowered.startswith("solved"):
-                outcome_val = "Solved"
-            elif lowered.startswith("not solved"):
-                outcome_val = "Not Solved"
-            else:
-                outcome_val = trimmed
-
-        report_row = {
-            "ticket_id": issue.get("id"),
-            "issue_key": issue.get("key"),
-            "resolvers_raw": resolvers_raw,
-            "primary_resolver": extracted_primary,
-            "resolve_helpers": "; ".join(resolve_helpers_mapped) if resolve_helpers_mapped else None,
-            "escalated_to_level": escalated_level,
-            "solved_level": extracted_primary_level,
-            "outcome": outcome_val,
-            "category": extracted.get("category"),
-            "new_category": extracted.get("new_category"),
-            "summary_block": extracted.get("summary"),
-            "rationale": extracted.get("rationale"),
-            "updated_at": datetime.datetime.now(datetime.UTC),
-        }
-        if not report_row["ticket_id"]:
-            return
-
-        resolver_rows = [
-            {
-                "ticket_id": report_row["ticket_id"],
-                "resolver": resolver_name,
-                "resolver_index": idx + 1,
-                "resolver_level": level,
-            }
-            for idx, (resolver_name, level) in enumerate(mapped_order)
-        ]
-        self.store.upsert_resolution_report(report_row, resolver_rows)
 
     @staticmethod
     def _adf_to_text(node: Any) -> str:
@@ -2657,13 +3606,99 @@ class SupportStatsGetter:
         return ts if ts.tzinfo else pytz.utc.localize(ts)
 
 
+def sync_jira_tickets(
+    getter: SupportStatsGetter,
+    updated_since: datetime.datetime | None,
+    recalculate_all: bool = False,
+) -> None:
+    """Fetch the tickets updated since ``updated_since`` and store them with their details.
+
+    Tickets are processed oldest change first and saved every
+    ``TICKET_BATCH_SIZE`` tickets, so a run that stops halfway resumes after
+    the last saved ticket.
+    """
+    logging.info("Fetching Jira tickets")
+    raw_issues = getter.fetch_jira_tickets(updated_since=updated_since)
+    logging.info("Retrieved %d tickets from Jira", len(raw_issues))
+    comments_total = 0
+    worklogs_total = 0
+    changelog_total = 0
+    calendar_total = 0
+    stored_ids: list[str] = []
+    batch: list[dict[str, Any]] = []
+    total_issues = len(raw_issues)
+
+    def save_batch() -> None:
+        """Save the processed tickets; the next run resumes after them."""
+        if not batch:
+            return
+        getter.store_jira_tickets(batch)
+        ids = [issue["id"] for issue in batch]
+        getter.recalculate_tickets(ids)
+        stored_ids.extend(ids)
+        batch.clear()
+        logging.info("Saved %d of %d tickets", len(stored_ids), total_issues)
+
+    try:
+        for idx, issue in enumerate(raw_issues, 1):
+            logging.info(
+                "Processing ticket %s (%d/%d)", issue.get("key"), idx, total_issues
+            )
+            comments = getter.fetch_jira_comments(issue["id"])
+            worklogs = getter.fetch_jira_worklogs(issue["id"])
+            changelog = getter.fetch_jira_changelog(issue["id"])
+
+            processed_issue = calculate_kpi_fields(issue, comments, changelog)
+            batch.append(processed_issue)
+
+            calendar_rows = make_jira_ticket_calendar(
+                issue,
+                comments,
+                worklogs,
+                changelog,
+                getter.config.custom_fields.get("request_type"),
+                getter.config.priority_deescalation_ignore_minutes,
+            )
+            # one commit per ticket instead of one per table
+            with getter.store.batch():
+                getter.store_jira_comments(issue["id"], issue.get("key"), comments)
+                getter.store_jira_worklogs(issue["id"], worklogs)
+                getter.store_jira_changelog(issue["id"], changelog)
+                getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
+            calendar_total += len(calendar_rows)
+
+            comments_total += len(comments)
+            worklogs_total += len(worklogs)
+            for hist in changelog:
+                changelog_total += len(hist.get("items", []))
+
+            if idx % 10 == 0 or idx == total_issues:
+                logging.info("Processed %d of %d tickets", idx, total_issues)
+
+            if len(batch) >= TICKET_BATCH_SIZE:
+                save_batch()
+    finally:
+        # also after an error: the tickets processed so far are complete
+        try:
+            save_batch()
+        except Exception:  # noqa: BLE001
+            logging.exception("Failed to save the last batch of tickets")
+
+    if recalculate_all:
+        logging.info("Recalculating statistics for all tickets")
+        getter.recalculate_all()
+    logging.info(
+        f"Stored {len(stored_ids)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs, {changelog_total} changelog items and {calendar_total} calendar rows in {getter.config.db_path}"
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Collect Jira ticket statistics")
     parser.add_argument(
         "--config",
         "-c",
-        default="config.json",
-        help="Path to the configuration JSON file",
+        default=None,
+        help="Path to the YAML (or JSON) config file. Default: config.yaml, else config.json",
     )
     parser.add_argument(
         "--log-level",
@@ -2676,104 +3711,126 @@ if __name__ == "__main__":
         help="Recalculate KPI fields for all stored tickets",
     )
     parser.add_argument(
-        "--backfill-resolution-from",
-        metavar="DATE",
-        help="Backfill resolution_reports for resolved tickets since DATE (YYYY-MM-DD) that are missing a category",
-    )
-    parser.add_argument(
         "--output-excel",
         nargs="?",
         const="SupportStats.xlsx",
         default=None,
         help="Export all views to an Excel workbook. If filename is omitted, uses 'SupportStats.xlsx'.",
     )
+
+    def parse_start_date(value: str) -> datetime.datetime:
+        try:
+            return datetime.datetime.combine(
+                datetime.date.fromisoformat(value), datetime.time()
+            )
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"invalid date '{value}', expected YYYY-MM-DD"
+            )
+
+    parser.add_argument(
+        "--start-date",
+        type=parse_start_date,
+        metavar="YYYY-MM-DD",
+        help=(
+            "For a new database: only fetch tickets updated on or after this date. "
+            "Ignored once the database contains tickets."
+        ),
+    )
+    parser.add_argument(
+        "--missing-credentials",
+        action="store_true",
+        help=(
+            "Only check the Jira credentials (config or environment) and exit: "
+            f"code {MISSING_USER_EXIT} = no jira_user, {MISSING_TOKEN_EXIT} = no "
+            f"jira_token, {MISSING_USER_EXIT | MISSING_TOKEN_EXIT} = both, 0 = both set. "
+            "Used by run.bat."
+        ),
+    )
     args = parser.parse_args()
 
-    cfg_path = Path(args.config)
+    if args.config:
+        cfg_path = Path(args.config)
+    else:
+        # older installations still use config.json; the built .exe also looks
+        # next to itself, e.g. when started from another folder
+        folders = [Path()]
+        if getattr(sys, "frozen", False):
+            folders.append(Path(sys.executable).parent)
+        cfg_path = next(
+            (
+                folder / name
+                for folder in folders
+                for name in ("config.yaml", "config.json")
+                if (folder / name).exists()
+            ),
+            Path("config.yaml"),
+        )
     if not cfg_path.exists():
         logging.basicConfig(level=logging.ERROR)
         logging.error(f"No configuration file found at {cfg_path}.")
         raise SystemExit(1)
 
     cfg = Config.load(cfg_path)
+    if args.missing_credentials:
+        raise SystemExit(
+            (0 if cfg.jira_user else MISSING_USER_EXIT)
+            | (0 if cfg.jira_token else MISSING_TOKEN_EXIT)
+        )
     log_level = args.log_level or cfg.log_level
-    setup_logging(log_level, cfg.log_file)
-
     output_excel = Path(args.output_excel) if args.output_excel else cfg.output_excel
+
+    # without its folder the log can't be written: report on the console only
+    message = missing_folder_message(cfg.log_file, "log_file", cfg_path)
+    if message:
+        logging.basicConfig(level=logging.ERROR, format="%(levelname)s - %(message)s")
+        logging.error(message)
+        raise SystemExit(1)
+    setup_logging(log_level, cfg.log_file)
+    messages = [
+        message
+        for message in (
+            missing_folder_message(cfg.db_path, "db_path", cfg_path),
+            missing_folder_message(
+                output_excel,
+                "output_excel" if not args.output_excel else "--output-excel",
+                None if args.output_excel else cfg_path,
+            ),
+        )
+        if message
+    ]
+    if messages:
+        for message in messages:
+            logging.error(message)
+        raise SystemExit(1)
 
     getter = SupportStatsGetter(cfg)
     logging.info("Running SupportStatsGetter")
     if cfg.jira_base_url:
         try:
+            getter.load_internal_groups()
             since = getter.latest_update_timestamp()
-            logging.info("Fetching Jira tickets")
-            raw_issues = getter.fetch_jira_tickets(updated_since=since)
-            logging.info("Retrieved %d tickets from Jira", len(raw_issues))
-            comments_total = 0
-            worklogs_total = 0
-            changelog_total = 0
-            calendar_total = 0
-            processed: list[dict[str, Any]] = []
-            total_issues = len(raw_issues)
-            for idx, issue in enumerate(raw_issues, 1):
+            if args.start_date and since is None:
+                since = args.start_date
                 logging.info(
-                    "Processing ticket %s (%d/%d)", issue.get("key"), idx, total_issues
+                    "New database: fetching tickets updated since %s",
+                    since.date().isoformat(),
                 )
-                comments = getter.fetch_jira_comments(issue["id"])
-                worklogs = getter.fetch_jira_worklogs(issue["id"])
-                changelog = getter.fetch_jira_changelog(issue["id"])
-
-                processed_issue = calculate_kpi_fields(issue, comments, changelog)
-                processed.append(processed_issue)
-
-                getter.store_jira_comments(issue["id"], issue.get("key"), comments)
-                getter.store_jira_worklogs(issue["id"], worklogs)
-                getter.store_jira_changelog(issue["id"], changelog)
-                getter.process_resolution_report(issue)
-
-                calendar_rows = make_jira_ticket_calendar(
-                    issue,
-                    comments,
-                    worklogs,
-                    changelog,
-                    getter.config.custom_fields.get("request_type"),
-                    getter.config.priority_deescalation_ignore_minutes,
+            elif args.start_date:
+                logging.warning(
+                    "--start-date ignored: database already contains tickets, "
+                    "fetching updates since %s",
+                    since,
                 )
-                getter.store.insert_many(getter.store.jira_calendar, calendar_rows)
-                calendar_total += len(calendar_rows)
-
-                comments_total += len(comments)
-                worklogs_total += len(worklogs)
-                for hist in changelog:
-                    changelog_total += len(hist.get("items", []))
-
-                if idx % 10 == 0 or idx == total_issues:
-                    logging.info("Processed %d of %d tickets", idx, total_issues)
-
-            logging.info("Saving tickets to database")
-            getter.store_jira_tickets(processed)
-            if args.recalculate_all:
-                logging.info("Recalculating statistics for all tickets")
-                getter.recalculate_all()
-            else:
-                logging.info("Recalculating statistics for new tickets")
-                getter.recalculate_tickets([issue["id"] for issue in processed])
-            logging.info(
-                f"Stored {len(processed)} Jira tickets, {comments_total} comments, {worklogs_total} worklogs, {changelog_total} changelog items and {calendar_total} calendar rows in {cfg.db_path}"
-            )
+            sync_jira_tickets(getter, since, args.recalculate_all)
+        except JiraAuthError as error:
+            # no report from outdated data: the run has to fail visibly
+            logging.error("%s No Excel report was written.", error)
+            raise SystemExit(JIRA_AUTH_FAILED_EXIT)
         except Exception:  # noqa: BLE001
             logging.exception("Failed to fetch or store Jira data")
     else:
         logging.error("Jira configuration missing in config file.")
-
-    if args.backfill_resolution_from:
-        try:
-            from_date = datetime.date.fromisoformat(args.backfill_resolution_from)
-        except ValueError:
-            logging.error("--backfill-resolution-from requires a date in YYYY-MM-DD format")
-            raise SystemExit(1)
-        logging.info("Starting resolution report backfill from %s", from_date)
-        getter.backfill_resolution_reports(from_date)
 
     if output_excel:
         logging.info("Writing Excel workbook to %s", output_excel)

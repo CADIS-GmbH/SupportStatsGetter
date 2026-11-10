@@ -1,3 +1,2 @@
-cd C:\temp\teamsupportstatsgetter
-git pull
-python SupportStatsGetter.py -c config.json
+cd /d C:\SupportStatsGetter
+.venv\Scripts\python.exe SupportStatsGetter.py -c config.yaml

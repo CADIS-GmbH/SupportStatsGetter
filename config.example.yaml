@@ -1,0 +1,216 @@
+# SupportStatsGetter configuration
+#
+# Copy this file to config.yaml and adjust it. Every option is listed; options
+# you leave out fall back to the default named in its comment.
+# Quote text that YAML could read as something else, e.g. "Yes", "No", "On",
+# "Off", "1.10" or values containing ": " or " #".
+# Put Windows paths in single quotes, e.g. 'C:\Stats\support.sqlite': inside
+# double quotes, backslashes start escapes (\t is a tab).
+
+# --- Jira connection ---------------------------------------------------------
+
+# Base URL of your Jira Cloud site.
+jira_base_url: "https://your-site.atlassian.net"
+
+# Jira account email and API token (create one at
+# https://id.atlassian.com/manage-profile/security/api-tokens).
+# Keep the token secret; don't commit your config.yaml.
+# Leave either empty (null) to read it from the environment variable
+# SUPPORTSTATS_JIRA_USER / SUPPORTSTATS_JIRA_TOKEN instead, e.g. when the
+# config is shared. run.bat of the exe version asks for missing ones and saves
+# them for the Windows user; or set them with
+#   setx SUPPORTSTATS_JIRA_TOKEN "<token>"   (new windows pick it up).
+jira_user: "you@example.com"
+jira_token: "<your API token>"
+
+# JQL that limits which tickets are fetched, e.g. one service desk project.
+# Leave empty to fetch all tickets the account can see.
+base_jql: 'project = "DEMO"'
+
+# Maps logical field names to the custom field IDs of your Jira instance.
+# The IDs differ per site: find them under Jira settings > Issues > Custom
+# fields (the number in the field's edit URL) or via /rest/api/3/field.
+# Remove a line if your site has no such field. Supported names:
+custom_fields:
+  request_type: customfield_10010          # service desk request type
+  organizations: customfield_10002         # service desk organizations -> customer
+  request_participants: customfield_10014  # request participants
+  satisfaction: customfield_10012          # CSAT rating (1-5)
+  satisfaction_ts: customfield_10013       # date of the CSAT rating
+  deployment_type: customfield_10011       # optional: stored per ticket
+  work_category: customfield_10015         # optional: stored per ticket
+  sentiment: customfield_10016             # optional: stored per ticket
+  resolution: resolution                   # resolution; Jira's standard field by default
+
+# --- Files -------------------------------------------------------------------
+
+# SQLite database that holds all fetched data. The folder must exist.
+db_path: 'data\support_stats.sqlite'
+
+# Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL) and log file.
+# --log-level on the command line overrides log_level.
+log_level: INFO
+log_file: 'data\support_stats.log'
+
+# Excel workbook written after each run; leave empty (null) for no export.
+# --output-excel on the command line overrides it.
+output_excel: 'data\SupportStats.xlsx'
+
+# What to do when the Excel file already exists:
+#   overwrite_with_backup - overwrite and keep a timestamped copy (default)
+#   overwrite             - overwrite without a copy
+#   no_overwrite          - stop with an error
+excel_write_mode: overwrite_with_backup
+
+# Start quarter preselected on the Excel dashboard, e.g. "2025.Q1".
+# null = the same quarter one year back. Can be changed in Excel anyway.
+dashboard_start_quarter: null
+
+# --- Which tickets count as support ------------------------------------------
+
+# Issue types counted in the KPIs (case-insensitive). An empty list counts
+# all issue types. Default: [Support]
+support_issue_types:
+  - Support
+
+# Request types left out of the KPIs, e.g. internal or sales requests.
+# Default: none.
+non_support_request_types:
+  - "Product trial questions"
+
+# Groups tickets into categories. Each category lists patterns; a ticket gets
+# the first category with a matching pattern. A pattern is either
+#   - a SQL LIKE pattern (% = any text, case-insensitive) for the request type, or
+#   - issue_type, request_type and/or label patterns that must all match (AND).
+#     label matches when any of the ticket's labels contains the text
+#     (case-insensitive; no commas).
+# The KPIs get an open_<category> and closed_<category> column per category,
+# and the dashboard shows customers per category. Example:
+#   request_type_categories:
+#     Incident_HW:
+#       - issue_type: Incident
+#         request_type: "%Hardware%"
+#     Incident:
+#       - issue_type: Incident
+#     HW:
+#       - "%Hardware%"
+# Or as a list of rules tried top-down, where a category can appear more than
+# once (the columns follow the first appearance of each category):
+#   request_type_categories:
+#     - category: HW
+#       issue_type: Incident
+#       label: hardware
+#     - category: DIS
+#       label: lobster
+#     - category: HW
+#       request_type: "%Hardware%"
+# Default (null): one category per issue type in support_issue_types, or per
+# stored issue type when that list is empty. {} = no categories.
+request_type_categories: null
+
+# Category for tickets that match no pattern. Default: null (no category).
+# Set to null together with an empty request_type_categories ({}) to drop the
+# category columns.
+request_type_category_default: null
+
+# --- Agents ------------------------------------------------------------------
+
+# Email domains of your agents. Comment authors with an address in one of these
+# domains count as internal, which the first/last response times rely on.
+# Adds to the regex patterns in the internal_users table. Authors without a
+# visible email address are judged by their Jira account type.
+# Default: none.
+internal_email_domains:
+  - example.com
+
+# Jira groups whose members are agents, e.g. the group of your Jira Service
+# Management agent licenses. When set, everyone else without an address in
+# internal_email_domains counts as external, also users with a full Jira account
+# (e.g. colleagues from other departments or customers' Jira users). The members
+# are read from Jira on every run; this needs the "Browse users and groups"
+# permission. Default: none (the Jira account type decides).
+internal_groups:
+  - service-desk-agents
+
+# --- Statuses ----------------------------------------------------------------
+# Status names are matched case-insensitively.
+
+# A ticket in one of these statuses is closed: it gets a resolved date, stops
+# counting open days and is left out of the open ticket counts.
+# Default: [Resolved, Closed, Cancelled]
+closed_statuses:
+  - Resolved
+  - Closed
+  - Cancelled
+
+# Cancelled tickets (is_junk) are left out of all KPIs. Default: [Cancelled]
+cancelled_statuses:
+  - Cancelled
+
+# Days spent in these statuses don't count towards the adjusted resolution
+# time, e.g. while waiting for the customer.
+# Default: [Closed, Cancelled, Resolved, "Waiting for customer", Pending]
+resolution_time_excluded_statuses:
+  - Closed
+  - Cancelled
+  - Resolved
+  - "Waiting for customer"
+  - Pending
+
+# Tickets in these statuses are not counted in the "no contact" (no_contact_days)
+# KPI. Default: [Closed, Resolved, Cancelled, Pending]
+no_contact_ignore_statuses:
+  - Closed
+  - Resolved
+  - Cancelled
+  - Pending
+
+# A ticket is not active in a week it spent entirely in these statuses: it is
+# left out of the active ticket counts (ongoing_tickets, open_<category>) for
+# that week. Run once with --recalculate-all after changing the list.
+# Default: none.
+inactive_statuses:
+  - "Waiting for development"
+
+# --- Assignee groups ---------------------------------------------------------
+# Jira labels that mark the team a ticket is assigned to, in priority order:
+# when a ticket has several of them, the first one in this list wins. The
+# ticket calendar stores the group at the start and end of each day
+# (start_assigned_group / end_assigned_group). Labels match case-insensitively.
+# Run once with --recalculate-all after changing the list.
+# Default: none (no groups are tracked).
+assignee_groups: []
+#   - 1stLevel
+#   - 2ndLevel
+#   - product-team
+
+# Group for tickets with none of the labels above, e.g. "1stLevel".
+# Default: null (no group).
+assignee_group_default: null
+
+# --- Backlog thresholds ------------------------------------------------------
+# Open tickets on Fridays are counted when they are open longer than these
+# numbers of days, or had no contact for more than no_contact_days weekdays.
+# The Excel columns keep their names (aged_5_plus, aged_30_plus,
+# over5_days_no_contact); the dashboard labels show the configured values.
+aged_days_short: 5    # Default: 5
+aged_days_long: 30    # Default: 30
+no_contact_days: 5    # Default: 5
+
+# --- Priorities --------------------------------------------------------------
+
+# Position of each Jira priority. Positions above 0 count as high priority,
+# and raising a ticket to a position above 0 counts as an escalation.
+# Priorities not listed get 0. Defaults are the standard Jira priorities below.
+priority_positions:
+  Lowest: -200
+  Low: -100
+  Medium: 0
+  Normal: 0
+  High: 100
+  Highest: 200
+  Critical: 200
+
+# A priority raise that is reverted within this many minutes is not counted
+# as an escalation (e.g. a mis-click). Default: 5
+priority_deescalation_ignore_minutes: 5
