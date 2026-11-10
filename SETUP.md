@@ -63,8 +63,13 @@ wins over the environment variables.
 Atlassian API tokens expire (at the latest after a year). When Jira rejects the
 login, the program stops with exit code 32 and writes no Excel report from old
 data, so a scheduled run shows up as failed. `run.bat` then forgets the saved
-email and token, asks for them again and repeats the run; in the Task Scheduler
-nobody can answer, so the next run you start by hand asks.
+token, asks for a new one (the saved email is offered again: press Enter to
+keep it) and repeats the run; in the Task Scheduler nobody can answer, so the
+next run you start by hand asks.
+
+`run.bat` and `SupportStatsGetter.exe` belong together: always copy both from
+the same build. An older exe with a newer `run.bat` stops with a message saying
+so.
 
 Options are passed on, e.g. `run.bat --start-date 2025-01-01` for the first
 download (step 4) or `run.bat --recalculate-all`. For regular runs (step 6),

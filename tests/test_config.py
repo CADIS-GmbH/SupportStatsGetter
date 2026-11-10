@@ -114,11 +114,25 @@ def test_missing_credentials_are_reported(tmp_path, monkeypatch, caplog):
     monkeypatch.delenv("SUPPORTSTATS_JIRA_USER", raising=False)
     monkeypatch.delenv("SUPPORTSTATS_JIRA_TOKEN", raising=False)
     path = tmp_path / "config.yaml"
-    path.write_text("jira_token: ''\n", encoding="utf-8")
+    path.write_text(
+        "jira_base_url: https://x.atlassian.net\njira_token: ''\n", encoding="utf-8"
+    )
     with caplog.at_level(logging.WARNING):
         config = Config.load(path)
     assert config.jira_token is None
     assert "SUPPORTSTATS_JIRA_TOKEN" in caplog.text
+
+
+def test_no_credential_warning_without_jira_site(tmp_path, monkeypatch, caplog):
+    # an export-only config (no jira_base_url) needs no credentials
+    monkeypatch.delenv("SUPPORTSTATS_JIRA_USER", raising=False)
+    monkeypatch.delenv("SUPPORTSTATS_JIRA_TOKEN", raising=False)
+    path = tmp_path / "config.yaml"
+    path.write_text("db_path: 'x.sqlite'\n", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        config = Config.load(path)
+    assert (config.jira_user, config.jira_token) == (None, None)
+    assert not caplog.records
 
 
 @pytest.mark.parametrize(

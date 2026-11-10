@@ -446,10 +446,12 @@ class Config:
             if value:
                 log.info("Using %s from the environment variable %s", key, env_var)
                 return value
-            log.warning(
-                "No %s: set it in %s or in the environment variable %s",
-                key, path, env_var,
-            )
+            # without a Jira site (export only) no credentials are needed
+            if data.get("jira_base_url"):
+                log.warning(
+                    "No %s: set it in %s or in the environment variable %s",
+                    key, path, env_var,
+                )
             return None
 
         categories = data.get("request_type_categories", DEFAULT_REQUEST_TYPE_CATEGORIES)
@@ -3222,6 +3224,7 @@ class SupportStatsGetter:
                 worklogs,
                 changelog,
                 self.config.custom_fields.get("request_type"),
+                self.config.priority_deescalation_ignore_minutes,
             )
             with self.store._begin() as conn:
                 conn.execute(

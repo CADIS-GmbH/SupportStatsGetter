@@ -41,7 +41,14 @@ echo Create an API token at https://id.atlassian.com/manage-profile/security/api
 echo.
 if "%NEED_USER%"=="0" goto :ask_token
 set "SUPPORTSTATS_JIRA_USER="
+if defined OLD_USER goto :ask_user_again
 set /p "SUPPORTSTATS_JIRA_USER=Jira email address: "
+goto :check_user
+:ask_user_again
+REM after a rejected login: Enter keeps the saved email, only the token is new
+set "SUPPORTSTATS_JIRA_USER=%OLD_USER%"
+set /p "SUPPORTSTATS_JIRA_USER=Jira email address [Enter = %OLD_USER%]: "
+:check_user
 if not defined SUPPORTSTATS_JIRA_USER (
   echo No email address entered.
   goto :error
@@ -76,6 +83,7 @@ REM --- Jira rejected the login (401) ------------------------------------------
 REM ask again for what comes from the environment variables; values written in
 REM config.yaml have to be fixed there
 set "RETRIED=1"
+set "OLD_USER=%SUPPORTSTATS_JIRA_USER%"
 set "SUPPORTSTATS_JIRA_USER="
 set "SUPPORTSTATS_JIRA_TOKEN="
 call :missing_credentials || goto :error
@@ -85,12 +93,13 @@ if "%MISSING%"=="0" (
   echo jira_token there, or remove them to use the saved Windows login instead.
   goto :error
 )
-REM forget the rejected values, so the next run asks even if this one stops
-if not "%NEED_USER%"=="0" powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('SUPPORTSTATS_JIRA_USER', $null, 'User')"
+REM forget the rejected token, so the next run asks even if this one stops;
+REM the email stays saved (the next prompt offers it) - usually only the
+REM token has expired
 if not "%NEED_TOKEN%"=="0" powershell -NoProfile -Command "[Environment]::SetEnvironmentVariable('SUPPORTSTATS_JIRA_TOKEN', $null, 'User')"
 echo.
 echo Jira rejected your saved login - the API token has probably expired.
-echo Please enter it again.
+echo Please enter a new token (and correct the email address if it is wrong).
 goto :ask_credentials
 
 :done
@@ -106,10 +115,17 @@ exit /b 1
 
 REM --- sets MISSING, NEED_USER and NEED_TOKEN; fails on other errors ----------
 REM exit code of --missing-credentials: 0 = all set, +8 = no email,
-REM +16 = no token, anything else = error (e.g. no config)
+REM +16 = no token, 2 = option unknown (exe older than this file), anything
+REM else = error (e.g. no config)
 :missing_credentials
 "%EXE%" -c config.yaml --missing-credentials 2>nul
 set "MISSING=%errorlevel%"
+if "%MISSING%"=="2" (
+  echo SupportStatsGetter.exe is older than this run.bat and can't check the
+  echo Jira login. Copy SupportStatsGetter.exe and run.bat from the same build
+  echo ^(build_exe.bat creates both^).
+  exit /b 1
+)
 set /a "NEED_USER=MISSING & 8, NEED_TOKEN=MISSING & 16, OTHER=MISSING & ~24"
 if not "%OTHER%"=="0" (
   "%EXE%" -c config.yaml --missing-credentials
